@@ -7,7 +7,15 @@ export default defineSchema({
     source: v.string(),
     receivedAt: v.string(),
     content: v.string(),
+    status: v.string(),
+    statusUpdatedAt: v.number(),
   }).index("by_external_id", ["externalId"]),
+  ingress_events: defineTable({
+    ingressId: v.id("inbox_items"),
+    eventType: v.string(),
+    description: v.string(),
+    createdAt: v.number(),
+  }).index("by_ingress_id_created_at", ["ingressId", "createdAt"]),
   work_items: defineTable({
     externalId: v.string(),
     inboxExternalId: v.string(),
