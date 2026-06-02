@@ -2,6 +2,10 @@
 
 import { IngressStatusBadge } from "@/components/ingress/IngressStatusBadge";
 import {
+  IngressRecommendationsCard,
+  type IngressRecommendedAction,
+} from "@/components/ingress/IngressRecommendationsCard";
+import {
   IngressTimeline,
   type IngressTimelineEventModel,
 } from "@/components/ingress/IngressTimeline";
@@ -22,6 +26,7 @@ export type WorkItem = {
   title: string;
   summary: string;
   status: string;
+  recommended_actions?: IngressRecommendedAction[];
 };
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -172,22 +177,32 @@ export function InboxClient({
         <section className="rounded-lg border p-4">
           <h2 className="mb-3 text-lg font-semibold">Inbox</h2>
           <div className="space-y-2">
-            {inboxItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setSelectedInboxId(item.id)}
-                className={`w-full rounded border px-3 py-2 text-left text-sm ${
-                  selectedInboxId === item.id ? "bg-zinc-100" : "bg-white"
-                }`}
-              >
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <p className="font-medium">{item.source}</p>
-                  <IngressStatusBadge status={item.status} />
-                </div>
-                <p className="line-clamp-2 text-zinc-600">{item.content}</p>
-              </button>
-            ))}
+            {inboxItems.map((item) => {
+              const workItem = workItems.find((work) => work.inbox_item_id === item.id);
+              const recommendationCount = workItem?.recommended_actions?.length ?? 0;
+
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setSelectedInboxId(item.id)}
+                  className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                    selectedInboxId === item.id ? "bg-zinc-100" : "bg-white"
+                  }`}
+                >
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <p className="font-medium">{item.source}</p>
+                    <IngressStatusBadge status={item.status} />
+                  </div>
+                  <p className="line-clamp-2 text-zinc-600">{item.content}</p>
+                  {recommendationCount > 0 ? (
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {recommendationCount} Recommended Actions
+                    </p>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         </section>
 
@@ -216,6 +231,11 @@ export function InboxClient({
                   <p className="text-zinc-600">No extracted work yet.</p>
                 )}
               </div>
+              {selectedWork ? (
+                <IngressRecommendationsCard
+                  recommendations={selectedWork.recommended_actions ?? []}
+                />
+              ) : null}
               <div>
                 <h3 className="font-medium">Processing Timeline</h3>
                 <div className="mt-2">

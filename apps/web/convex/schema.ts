@@ -22,6 +22,15 @@ export default defineSchema({
     title: v.string(),
     summary: v.string(),
     status: v.string(),
+    recommendedActions: v.optional(
+      v.array(
+        v.object({
+          title: v.string(),
+          description: v.string(),
+          actionType: v.string(),
+        }),
+      ),
+    ),
   })
     .index("by_external_id", ["externalId"])
     .index("by_inbox_external_id", ["inboxExternalId"]),

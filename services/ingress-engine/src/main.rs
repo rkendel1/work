@@ -1,9 +1,15 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
+use recommendation_engine::{
+    ClassificationResult, Entity as ClassificationEntity, RecommendedAction, RecommendationGenerator,
+    RuleBasedRecommendationEngine,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
+
+mod recommendation_engine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InboxItem {
@@ -38,6 +44,7 @@ struct WorkItem {
     title: String,
     summary: String,
     status: String,
+    recommended_actions: Vec<RecommendedAction>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,32 +120,75 @@ fn contains_any(content: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| content.contains(keyword))
 }
 
-fn classify_content(content: &str) -> (&'static str, &'static str) {
+fn extract_entities(content: &str) -> Vec<ClassificationEntity> {
+    let lower = content.to_lowercase();
+    let mut entities = Vec::new();
+
+    if lower.contains("hvac") {
+        entities.push(ClassificationEntity {
+            value: "HVAC".to_string(),
+        });
+    }
+    if lower.contains("conference room a") {
+        entities.push(ClassificationEntity {
+            value: "Conference Room A".to_string(),
+        });
+    }
+
+    entities
+}
+
+fn classify_content(content: &str) -> ClassificationResult {
     let lower = content.to_lowercase();
 
     if contains_any(
         &lower,
         &["hvac", "broken", "down", "not working", "repair", "issue"],
     ) {
-        (
-            "Maintenance Request",
-            "Operational maintenance issue requiring inspection and follow-up.",
-        )
-    } else if contains_any(&lower, &["invoice", "payment"]) {
-        (
-            "Finance Inquiry",
-            "Financial question detected from incoming operational information.",
-        )
+        ClassificationResult {
+            classification: "maintenance_request".to_string(),
+            confidence: 0.93,
+            priority: "medium".to_string(),
+            reason: "Operational maintenance issue requiring inspection and follow-up.".to_string(),
+            entities: extract_entities(content),
+            recommendations: Vec::new(),
+        }
+    } else if contains_any(&lower, &["invoice", "payment", "billing", "dispute"]) {
+        ClassificationResult {
+            classification: "billing_inquiry".to_string(),
+            confidence: 0.9,
+            priority: "medium".to_string(),
+            reason: "Billing or invoice review is needed before responding.".to_string(),
+            entities: extract_entities(content),
+            recommendations: Vec::new(),
+        }
     } else if contains_any(&lower, &["schedule", "appointment"]) {
-        (
-            "Scheduling Request",
-            "Scheduling-related request detected and ready for action.",
-        )
+        ClassificationResult {
+            classification: "scheduling_request".to_string(),
+            confidence: 0.9,
+            priority: "medium".to_string(),
+            reason: "Scheduling-related request detected and ready for action.".to_string(),
+            entities: extract_entities(content),
+            recommendations: Vec::new(),
+        }
     } else {
-        (
-            "Operational Request",
-            "General operational request extracted from incoming information.",
-        )
+        ClassificationResult {
+            classification: "operational_request".to_string(),
+            confidence: 0.75,
+            priority: "medium".to_string(),
+            reason: "General operational request extracted from incoming information.".to_string(),
+            entities: extract_entities(content),
+            recommendations: Vec::new(),
+        }
+    }
+}
+
+fn classification_title(classification: &str) -> &'static str {
+    match classification {
+        "maintenance_request" => "Maintenance Request",
+        "billing_inquiry" => "Billing Inquiry",
+        "scheduling_request" => "Scheduling Request",
+        _ => "Operational Request",
     }
 }
 
@@ -206,13 +256,16 @@ fn update_ingress_status(
 }
 
 fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
-    let (title, summary) = classify_content(&inbox_item.content);
+    let mut classification_result = classify_content(&inbox_item.content);
+    let recommendation_engine = RuleBasedRecommendationEngine;
+    classification_result.recommendations = recommendation_engine.generate(&classification_result);
     let work_item = WorkItem {
         id: Uuid::new_v4(),
         inbox_item_id: inbox_item.id,
-        title: title.to_string(),
-        summary: summary.to_string(),
+        title: classification_title(&classification_result.classification).to_string(),
+        summary: classification_result.reason.clone(),
         status: "open".to_string(),
+        recommended_actions: classification_result.recommendations.clone(),
     };
 
     state.work_items.push(work_item.clone());
@@ -301,6 +354,15 @@ struct ConvexWorkArgs {
     title: String,
     summary: String,
     status: String,
+    recommended_actions: Vec<ConvexRecommendedAction>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexRecommendedAction {
+    title: String,
+    description: String,
+    action_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -399,6 +461,15 @@ async fn forward_work_to_convex(
             title: work_item.title.clone(),
             summary: work_item.summary.clone(),
             status: work_item.status.clone(),
+            recommended_actions: work_item
+                .recommended_actions
+                .iter()
+                .map(|action| ConvexRecommendedAction {
+                    title: action.title.clone(),
+                    description: action.description.clone(),
+                    action_type: action.action_type.as_str().to_string(),
+                })
+                .collect(),
         },
     )
     .await
@@ -469,7 +540,7 @@ async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) ->
 }
 
 async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) -> impl Responder {
-    let (work_item, is_new, status_updates) = {
+    let (work_item, is_new, status_updates, recommendation_events) = {
         let mut state = lock_state(&data);
 
         if let Some(existing) = state
@@ -478,7 +549,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             .find(|work_item| work_item.inbox_item_id == request.inbox_item_id)
             .cloned()
         {
-            (existing, false, Vec::new())
+            (existing, false, Vec::new(), Vec::new())
         } else {
             let Some(inbox_item) = state
                 .inbox_items
@@ -499,6 +570,16 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             ) {
                 status_updates.push((inbox_item.id, classified_event));
             }
+            let recommendations_event = create_ingress_event(
+                &mut state,
+                inbox_item.id,
+                "recommendations_generated".to_string(),
+                format!(
+                    "Generated {} recommended actions",
+                    work_item.recommended_actions.len()
+                ),
+            );
+            let recommendation_events = vec![(inbox_item.id, recommendations_event)];
             if let Some(work_generated_event) = update_ingress_status(
                 &mut state,
                 inbox_item.id,
@@ -508,7 +589,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
                 status_updates.push((inbox_item.id, work_generated_event));
             }
 
-            (work_item, true, status_updates)
+            (work_item, true, status_updates, recommendation_events)
         }
     };
 
@@ -530,6 +611,18 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
                 eprintln!("failed to forward ingress status update to convex: {error}");
             }
         }
+        for (inbox_item_id, event) in &recommendation_events {
+            if let Err(error) = forward_ingress_event_to_convex(
+                &data.client,
+                &data.convex_config,
+                *inbox_item_id,
+                event,
+            )
+            .await
+            {
+                eprintln!("failed to forward recommendation event to convex: {error}");
+            }
+        }
         HttpResponse::Created().json(work_item)
     } else {
         HttpResponse::Ok().json(work_item)
@@ -543,7 +636,13 @@ async fn postmark_inbound(
     let content = build_postmark_content(&payload);
     let source = postmark_source(&payload);
 
-    let (inbox_item, work_item, status_updates, received_event) = {
+    let (
+        inbox_item,
+        work_item,
+        status_updates,
+        received_event,
+        recommendations_event,
+    ) = {
         let mut state = lock_state(&data);
         let inbox_item = create_inbox_item(&mut state, source, content);
         let work_item = create_work_item(&mut state, &inbox_item);
@@ -556,6 +655,15 @@ async fn postmark_inbound(
         ) {
             status_updates.push((inbox_item.id, classified_event));
         }
+        let recommendations_event = create_ingress_event(
+            &mut state,
+            inbox_item.id,
+            "recommendations_generated".to_string(),
+            format!(
+                "Generated {} recommended actions",
+                work_item.recommended_actions.len()
+            ),
+        );
         if let Some(work_generated_event) = update_ingress_status(
             &mut state,
             inbox_item.id,
@@ -569,7 +677,13 @@ async fn postmark_inbound(
             .iter()
             .find(|event| event.ingress_id == inbox_item.id && event.event_type == "received")
             .cloned();
-        (inbox_item, work_item, status_updates, received_event)
+        (
+            inbox_item,
+            work_item,
+            status_updates,
+            received_event,
+            recommendations_event,
+        )
     };
 
     if let Err(error) =
@@ -584,6 +698,16 @@ async fn postmark_inbound(
         {
             eprintln!("failed to forward postmark ingress event to convex: {error}");
         }
+    }
+    if let Err(error) = forward_ingress_event_to_convex(
+        &data.client,
+        &data.convex_config,
+        inbox_item.id,
+        &recommendations_event,
+    )
+    .await
+    {
+        eprintln!("failed to forward postmark recommendation event to convex: {error}");
     }
 
     if let Err(error) = forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
@@ -701,6 +825,8 @@ mod tests {
         assert_eq!(work_item.inbox_item_id, inbox_item.id);
         assert_eq!(work_item.title, "Maintenance Request");
         assert_eq!(work_item.status, "open");
+        assert_eq!(work_item.recommended_actions.len(), 2);
+        assert_eq!(work_item.recommended_actions[0].title, "Inspect HVAC Unit");
         assert_eq!(items[0].status, "work_generated");
     }
 
@@ -751,7 +877,7 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].title, "Finance Inquiry");
+        assert_eq!(work[0].title, "Billing Inquiry");
     }
 
     #[actix_web::test]
@@ -777,6 +903,7 @@ mod tests {
         assert_eq!(response.inbox_item.source, "postmark:alerts@example.com");
         assert!(response.inbox_item.content.contains("HVAC broken"));
         assert_eq!(response.work_item.title, "Maintenance Request");
+        assert_eq!(response.work_item.recommended_actions.len(), 2);
 
         let items_req = test::TestRequest::get().uri("/items").to_request();
         let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
@@ -827,6 +954,7 @@ mod tests {
             vec![
                 "received".to_string(),
                 "classified".to_string(),
+                "recommendations_generated".to_string(),
                 "work_generated".to_string()
             ]
         );
