@@ -105,6 +105,15 @@ export const createWorkItem = mutationGeneric({
     title: v.string(),
     summary: v.string(),
     status: v.string(),
+    recommendedActions: v.optional(
+      v.array(
+        v.object({
+          title: v.string(),
+          description: v.string(),
+          actionType: v.string(),
+        }),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -124,6 +133,7 @@ export const createWorkItem = mutationGeneric({
       title: args.title,
       summary: args.summary,
       status: args.status,
+      recommendedActions: args.recommendedActions,
     });
   },
 });

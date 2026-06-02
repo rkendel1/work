@@ -14,6 +14,8 @@ function titleForType(type: string): string {
       return "Received";
     case "classified":
       return "Classified";
+    case "recommendations_generated":
+      return "Recommendations Generated";
     case "work_generated":
       return "Work Generated";
     case "closed":
