@@ -11,6 +11,24 @@ struct InboxItem {
     source: String,
     received_at: DateTime<Utc>,
     content: String,
+    status: String,
+    status_updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngressEvent {
+    ingress_id: Uuid,
+    event_type: String,
+    description: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IngressTimelineEntry {
+    #[serde(rename = "type")]
+    entry_type: String,
+    description: String,
+    created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +77,7 @@ struct PostmarkWebhookResponse {
 #[derive(Default)]
 struct State {
     inbox_items: Vec<InboxItem>,
+    ingress_events: Vec<IngressEvent>,
     work_items: Vec<WorkItem>,
 }
 
@@ -124,15 +143,66 @@ fn classify_content(content: &str) -> (&'static str, &'static str) {
 }
 
 fn create_inbox_item(state: &mut State, source: String, content: String) -> InboxItem {
+    let now = Utc::now();
     let item = InboxItem {
         id: Uuid::new_v4(),
         source,
-        received_at: Utc::now(),
+        received_at: now,
         content,
+        status: "received".to_string(),
+        status_updated_at: now,
     };
 
     state.inbox_items.push(item.clone());
+    create_ingress_event(
+        state,
+        item.id,
+        "received".to_string(),
+        format!("Received via {}", item.source),
+    );
     item
+}
+
+fn create_ingress_event(
+    state: &mut State,
+    ingress_id: Uuid,
+    event_type: String,
+    description: String,
+) -> IngressEvent {
+    let event = IngressEvent {
+        ingress_id,
+        event_type,
+        description,
+        created_at: Utc::now(),
+    };
+
+    state.ingress_events.push(event.clone());
+    event
+}
+
+fn update_ingress_status(
+    state: &mut State,
+    inbox_item_id: Uuid,
+    status: &str,
+    description: String,
+) -> Option<IngressEvent> {
+    let new_status = status.to_string();
+    let now = Utc::now();
+    let inbox_item = state
+        .inbox_items
+        .iter_mut()
+        .find(|item| item.id == inbox_item_id)?;
+
+    inbox_item.status = new_status.clone();
+    inbox_item.status_updated_at = now;
+    let _ = inbox_item;
+
+    Some(create_ingress_event(
+        state,
+        inbox_item_id,
+        new_status,
+        description,
+    ))
 }
 
 fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
@@ -213,20 +283,44 @@ struct ConvexMutationRequest<T> {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConvexInboxArgs {
     external_id: String,
     source: String,
     received_at: String,
     content: String,
+    status: String,
+    status_updated_at: i64,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConvexWorkArgs {
     external_id: String,
     inbox_external_id: String,
     title: String,
     summary: String,
     status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexIngressEventArgs {
+    ingress_external_id: String,
+    event_type: String,
+    description: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexUpdateIngressStatusArgs {
+    ingress_external_id: String,
+    status: String,
+    status_updated_at: i64,
+    event_type: String,
+    description: String,
+    created_at: i64,
 }
 
 async fn send_convex_mutation<T: Serialize>(
@@ -283,6 +377,8 @@ async fn forward_inbox_to_convex(
             source: inbox_item.source.clone(),
             received_at: inbox_item.received_at.to_rfc3339(),
             content: inbox_item.content.clone(),
+            status: inbox_item.status.clone(),
+            status_updated_at: inbox_item.status_updated_at.timestamp(),
         },
     )
     .await
@@ -308,21 +404,72 @@ async fn forward_work_to_convex(
     .await
 }
 
+async fn forward_ingress_event_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    inbox_item_id: Uuid,
+    event: &IngressEvent,
+) -> Result<(), String> {
+    send_convex_mutation(
+        client,
+        convex_config,
+        "inbox:createIngressEvent",
+        ConvexIngressEventArgs {
+            ingress_external_id: inbox_item_id.to_string(),
+            event_type: event.event_type.clone(),
+            description: event.description.clone(),
+            created_at: event.created_at.timestamp(),
+        },
+    )
+    .await
+}
+
+async fn forward_status_update_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    inbox_item_id: Uuid,
+    event: &IngressEvent,
+) -> Result<(), String> {
+    send_convex_mutation(
+        client,
+        convex_config,
+        "inbox:updateIngressStatus",
+        ConvexUpdateIngressStatusArgs {
+            ingress_external_id: inbox_item_id.to_string(),
+            status: event.event_type.clone(),
+            status_updated_at: event.created_at.timestamp(),
+            event_type: event.event_type.clone(),
+            description: event.description.clone(),
+            created_at: event.created_at.timestamp(),
+        },
+    )
+    .await
+}
+
 async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) -> impl Responder {
-    let item = {
+    let (item, received_event) = {
         let mut state = lock_state(&data);
-        create_inbox_item(&mut state, request.source.clone(), request.content.clone())
+        let item = create_inbox_item(&mut state, request.source.clone(), request.content.clone());
+        let received_event = state.ingress_events.last().cloned();
+        (item, received_event)
     };
 
     if let Err(error) = forward_inbox_to_convex(&data.client, &data.convex_config, &item).await {
         eprintln!("failed to forward inbox item to convex: {error}");
+    }
+    if let Some(event) = received_event {
+        if let Err(error) =
+            forward_ingress_event_to_convex(&data.client, &data.convex_config, item.id, &event).await
+        {
+            eprintln!("failed to forward ingress event to convex: {error}");
+        }
     }
 
     HttpResponse::Created().json(item)
 }
 
 async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) -> impl Responder {
-    let (work_item, is_new) = {
+    let (work_item, is_new, status_updates) = {
         let mut state = lock_state(&data);
 
         if let Some(existing) = state
@@ -331,7 +478,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             .find(|work_item| work_item.inbox_item_id == request.inbox_item_id)
             .cloned()
         {
-            (existing, false)
+            (existing, false, Vec::new())
         } else {
             let Some(inbox_item) = state
                 .inbox_items
@@ -343,7 +490,25 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             };
 
             let work_item = create_work_item(&mut state, &inbox_item);
-            (work_item, true)
+            let mut status_updates = Vec::new();
+            if let Some(classified_event) = update_ingress_status(
+                &mut state,
+                inbox_item.id,
+                "classified",
+                format!("Classification: {}", work_item.title),
+            ) {
+                status_updates.push((inbox_item.id, classified_event));
+            }
+            if let Some(work_generated_event) = update_ingress_status(
+                &mut state,
+                inbox_item.id,
+                "work_generated",
+                format!("Created Work Item {}", work_item.id),
+            ) {
+                status_updates.push((inbox_item.id, work_generated_event));
+            }
+
+            (work_item, true, status_updates)
         }
     };
 
@@ -352,6 +517,18 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
         {
             eprintln!("failed to forward work item to convex: {error}");
+        }
+        for (inbox_item_id, event) in &status_updates {
+            if let Err(error) = forward_status_update_to_convex(
+                &data.client,
+                &data.convex_config,
+                *inbox_item_id,
+                event,
+            )
+            .await
+            {
+                eprintln!("failed to forward ingress status update to convex: {error}");
+            }
         }
         HttpResponse::Created().json(work_item)
     } else {
@@ -366,11 +543,33 @@ async fn postmark_inbound(
     let content = build_postmark_content(&payload);
     let source = postmark_source(&payload);
 
-    let (inbox_item, work_item) = {
+    let (inbox_item, work_item, status_updates, received_event) = {
         let mut state = lock_state(&data);
         let inbox_item = create_inbox_item(&mut state, source, content);
         let work_item = create_work_item(&mut state, &inbox_item);
-        (inbox_item, work_item)
+        let mut status_updates = Vec::new();
+        if let Some(classified_event) = update_ingress_status(
+            &mut state,
+            inbox_item.id,
+            "classified",
+            format!("Classification: {}", work_item.title),
+        ) {
+            status_updates.push((inbox_item.id, classified_event));
+        }
+        if let Some(work_generated_event) = update_ingress_status(
+            &mut state,
+            inbox_item.id,
+            "work_generated",
+            format!("Created Work Item {}", work_item.id),
+        ) {
+            status_updates.push((inbox_item.id, work_generated_event));
+        }
+        let received_event = state
+            .ingress_events
+            .iter()
+            .find(|event| event.ingress_id == inbox_item.id && event.event_type == "received")
+            .cloned();
+        (inbox_item, work_item, status_updates, received_event)
     };
 
     if let Err(error) =
@@ -378,10 +577,30 @@ async fn postmark_inbound(
     {
         eprintln!("failed to forward postmark inbox item to convex: {error}");
     }
+    if let Some(event) = received_event {
+        if let Err(error) =
+            forward_ingress_event_to_convex(&data.client, &data.convex_config, inbox_item.id, &event)
+                .await
+        {
+            eprintln!("failed to forward postmark ingress event to convex: {error}");
+        }
+    }
 
     if let Err(error) = forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
     {
         eprintln!("failed to forward postmark work item to convex: {error}");
+    }
+    for (inbox_item_id, event) in &status_updates {
+        if let Err(error) = forward_status_update_to_convex(
+            &data.client,
+            &data.convex_config,
+            *inbox_item_id,
+            event,
+        )
+        .await
+        {
+            eprintln!("failed to forward postmark ingress status update to convex: {error}");
+        }
     }
 
     HttpResponse::Created().json(PostmarkWebhookResponse {
@@ -395,6 +614,23 @@ async fn list_items(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(&state.inbox_items)
 }
 
+async fn item_timeline(data: web::Data<AppState>, inbox_item_id: web::Path<Uuid>) -> impl Responder {
+    let state = lock_state(&data);
+    let mut timeline: Vec<IngressTimelineEntry> = state
+        .ingress_events
+        .iter()
+        .filter(|event| event.ingress_id == *inbox_item_id)
+        .map(|event| IngressTimelineEntry {
+            entry_type: event.event_type.clone(),
+            description: event.description.clone(),
+            created_at: event.created_at.timestamp(),
+        })
+        .collect();
+    timeline.sort_by_key(|event| event.created_at);
+
+    HttpResponse::Ok().json(timeline)
+}
+
 async fn list_work(data: web::Data<AppState>) -> impl Responder {
     let state = lock_state(&data);
     HttpResponse::Ok().json(&state.work_items)
@@ -404,6 +640,7 @@ fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.route("/ingest", web::post().to(ingest))
         .route("/extract", web::post().to(extract))
         .route("/items", web::get().to(list_items))
+        .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
         .route("/webhooks/postmark", web::post().to(postmark_inbound));
 }
@@ -458,10 +695,13 @@ mod tests {
             .to_request();
 
         let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+        let items_req = test::TestRequest::get().uri("/items").to_request();
+        let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
 
         assert_eq!(work_item.inbox_item_id, inbox_item.id);
         assert_eq!(work_item.title, "Maintenance Request");
         assert_eq!(work_item.status, "open");
+        assert_eq!(items[0].status, "work_generated");
     }
 
     #[actix_web::test]
@@ -546,5 +786,49 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(work.len(), 1);
+        assert_eq!(items[0].status, "work_generated");
+    }
+
+    #[actix_web::test]
+    async fn timeline_endpoint_returns_lifecycle_events_in_order() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&IngestRequest {
+                source: "email".to_string(),
+                content: "HVAC is broken".to_string(),
+            })
+            .to_request();
+
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+
+        let _work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let timeline_req = test::TestRequest::get()
+            .uri(&format!("/items/{}/timeline", inbox_item.id))
+            .to_request();
+        let timeline: Vec<IngressTimelineEntry> =
+            test::call_and_read_body_json(&app, timeline_req).await;
+
+        let event_types: Vec<String> = timeline
+            .iter()
+            .map(|event| event.entry_type.clone())
+            .collect();
+        assert_eq!(
+            event_types,
+            vec![
+                "received".to_string(),
+                "classified".to_string(),
+                "work_generated".to_string()
+            ]
+        );
     }
 }

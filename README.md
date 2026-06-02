@@ -40,6 +40,7 @@ Convex operational state
 - `POST /extract`
 - `POST /webhooks/postmark`
 - `GET /items`
+- `GET /items/{id}/timeline`
 - `GET /work`
 
 ## Convex Data Model
@@ -47,6 +48,7 @@ Convex operational state
 Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 
 - `inbox_items`
+- `ingress_events`
 - `work_items`
 - `users`
 - `tenants`

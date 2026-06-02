@@ -1,12 +1,19 @@
 "use client";
 
-import { FormEvent, useCallback, useState } from "react";
+import { IngressStatusBadge } from "@/components/ingress/IngressStatusBadge";
+import {
+  IngressTimeline,
+  type IngressTimelineEventModel,
+} from "@/components/ingress/IngressTimeline";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 export type InboxItem = {
   id: string;
   source: string;
   received_at: string;
   content: string;
+  status: string;
+  status_updated_at: string;
 };
 
 export type WorkItem = {
@@ -43,6 +50,7 @@ export function InboxClient({
   );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [timeline, setTimeline] = useState<IngressTimelineEventModel[]>([]);
 
   const refresh = useCallback(async () => {
     const [items, work] = await Promise.all([
@@ -55,6 +63,25 @@ export function InboxClient({
     if (!selectedInboxId && items.length > 0) {
       setSelectedInboxId(items[0].id);
     }
+  }, [selectedInboxId]);
+
+  useEffect(() => {
+    if (!selectedInboxId) {
+      return;
+    }
+
+    const loadTimeline = async () => {
+      try {
+        const events = await fetchJson<IngressTimelineEventModel[]>(
+          `/api/items/${selectedInboxId}/timeline`,
+        );
+        setTimeline(events);
+      } catch {
+        setTimeline([]);
+      }
+    };
+
+    void loadTimeline();
   }, [selectedInboxId]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -154,7 +181,10 @@ export function InboxClient({
                   selectedInboxId === item.id ? "bg-zinc-100" : "bg-white"
                 }`}
               >
-                <p className="font-medium">{item.source}</p>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="font-medium">{item.source}</p>
+                  <IngressStatusBadge status={item.status} />
+                </div>
                 <p className="line-clamp-2 text-zinc-600">{item.content}</p>
               </button>
             ))}
@@ -168,6 +198,9 @@ export function InboxClient({
               <div>
                 <h3 className="font-medium">Raw Message</h3>
                 <p className="whitespace-pre-wrap text-zinc-700">{selectedInbox.content}</p>
+                <div className="mt-2">
+                  <IngressStatusBadge status={selectedInbox.status} />
+                </div>
               </div>
               <div>
                 <h3 className="font-medium">Extracted Work</h3>
@@ -182,6 +215,12 @@ export function InboxClient({
                 ) : (
                   <p className="text-zinc-600">No extracted work yet.</p>
                 )}
+              </div>
+              <div>
+                <h3 className="font-medium">Processing Timeline</h3>
+                <div className="mt-2">
+                  <IngressTimeline events={timeline} />
+                </div>
               </div>
             </div>
           ) : (
