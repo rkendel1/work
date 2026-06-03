@@ -12,8 +12,11 @@ Convex operational state
 
 ## Repository Layout
 
+- `/tmp/workspace/rkendel1/work/package.json` — root deployment orchestrator (Vercel + Convex bootstrap + WASM build)
+- `/tmp/workspace/rkendel1/work/vercel.json` — Vercel build/install configuration
 - `/tmp/workspace/rkendel1/work/apps/web` — Next.js frontend + API routes + Better Auth + Convex functions
 - `/tmp/workspace/rkendel1/work/services/ingress-engine` — Rust Actix ingestion/extraction service
+- `/tmp/workspace/rkendel1/work/scripts/bootstrap-convex.ts` — idempotent Convex bootstrap hook
 
 ## Implemented Stack
 
@@ -107,7 +110,15 @@ npm install
 npm run dev
 ```
 
-### 3) Tests / Checks
+### 3) Unified root workflow (matches Vercel pipeline)
+
+```bash
+cd /tmp/workspace/rkendel1/work
+npm install
+npm run build
+```
+
+### 4) Tests / Checks
 
 Rust tests:
 

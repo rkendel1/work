@@ -1,0 +1,13 @@
+{
+  "name": "opsinbox-platform",
+  "private": true,
+  "dependencies": {
+    "next": "16.2.7"
+  },
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm run build:wasm && npm --prefix apps/web run build",
+    "build:wasm": "cd services/ingress-engine && ./build-wasm.sh",
+    "postinstall": "npm --prefix apps/web install && node scripts/bootstrap-convex.js"
+  }
+}

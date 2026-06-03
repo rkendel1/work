@@ -25,7 +25,7 @@ const textDecoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: true });
 let wasmPromise: Promise<WasmRuntime> | null = null;
 
 function readWasmArtifact() {
-  const wasmPath = path.join(process.cwd(), "wasm/ingress_engine.wasm");
+  const wasmPath = path.join(process.cwd(), "wasm/ingress_engine_bg.wasm");
   return fs.readFileSync(wasmPath);
 }
 
