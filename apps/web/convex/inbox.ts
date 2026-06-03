@@ -66,6 +66,10 @@ export const createSignalEvent = mutationGeneric({
   args: {
     tenantId: v.string(),
     sourceType: v.string(),
+    provenance: v.object({
+      origin: v.string(),
+      generatedBy: v.string(),
+    }),
     rawPayload: v.any(),
     normalizedContent: v.string(),
     metadata: v.object({
@@ -78,6 +82,7 @@ export const createSignalEvent = mutationGeneric({
     return await ctx.db.insert("signal_events", {
       tenantId: args.tenantId,
       sourceType: args.sourceType,
+      provenance: args.provenance,
       rawPayload: args.rawPayload,
       normalizedContent: args.normalizedContent,
       metadata: args.metadata,

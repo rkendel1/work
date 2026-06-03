@@ -4,6 +4,10 @@ import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type SignalPayload = {
   sourceType?: string;
+  provenance?: {
+    origin?: "real" | "synthetic" | "mixed";
+    generatedBy?: "user" | "system" | "scenario_engine";
+  };
   rawPayload?: unknown;
   normalizedContent?: string;
   metadata?: {
@@ -38,6 +42,13 @@ export async function POST(request: Request) {
     const result = await ingestSignalWithWasm({
       tenantId,
       sourceType,
+      provenance:
+        payload.provenance?.origin && payload.provenance.generatedBy
+          ? {
+              origin: payload.provenance.origin,
+              generatedBy: payload.provenance.generatedBy,
+            }
+          : undefined,
       rawPayload: payload.rawPayload ?? {},
       normalizedContent,
       metadata: payload.metadata,

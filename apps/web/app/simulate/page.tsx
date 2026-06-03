@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Tenant = { id: string; display_name: string };
-type SimulationMode = "single" | "burst" | "scenario";
+type InjectionMode = "single" | "burst" | "scenario";
 
 const SCENARIO_LIBRARY: Record<string, string[]> = {
   "Facilities outage day": [
@@ -35,6 +35,10 @@ async function postSignal(tenantId: string, content: string) {
     body: JSON.stringify({
       tenantId,
       sourceType: "simulation",
+      provenance: {
+        origin: "synthetic",
+        generatedBy: "scenario_engine",
+      },
       normalizedContent: content,
       metadata: {
         channel: "simulator",
@@ -47,7 +51,7 @@ async function postSignal(tenantId: string, content: string) {
 export default function SimulatePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantId] = useState("default");
-  const [mode, setMode] = useState<SimulationMode>("single");
+  const [mode, setMode] = useState<InjectionMode>("single");
   const [payload, setPayload] = useState("HVAC failure email");
   const [burstSize, setBurstSize] = useState(10);
   const [scenario, setScenario] = useState("Facilities outage day");
@@ -83,10 +87,10 @@ export default function SimulatePage() {
     return SCENARIO_LIBRARY[scenario] ?? [];
   }, [burstSize, mode, payload, scenario]);
 
-  async function runSimulation(event: FormEvent<HTMLFormElement>) {
+  async function runInjection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setRunning(true);
-    setStatus("Running simulation...");
+    setStatus("Running scenario injection...");
     let successCount = 0;
     for (const content of payloads) {
       const response = await postSignal(tenantId, content);
@@ -98,19 +102,19 @@ export default function SimulatePage() {
       }
     }
     setRunning(false);
-    setStatus(`Simulation complete: ${successCount}/${payloads.length} signals processed.`);
+    setStatus(`Scenario injection complete: ${successCount}/${payloads.length} signals processed.`);
   }
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-6 py-16">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold">Simulation Harness</h1>
+        <h1 className="text-3xl font-semibold">Scenario Injection Harness</h1>
         <p className="text-zinc-600 dark:text-zinc-400">
-          Generate inbound operational signals and replay the full ingest-to-execution pipeline.
+          Inject operational scenarios into the live stream and run the full ingest-to-execution pipeline.
         </p>
       </section>
 
-      <form onSubmit={runSimulation} className="grid gap-4 rounded-lg border bg-white p-5 dark:bg-zinc-800 dark:border-zinc-700">
+      <form onSubmit={runInjection} className="grid gap-4 rounded-lg border bg-white p-5 dark:bg-zinc-800 dark:border-zinc-700">
         <label className="grid gap-1 text-sm">
           Tenant
           <select
@@ -132,11 +136,11 @@ export default function SimulatePage() {
           <select
             className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
             value={mode}
-            onChange={(event) => setMode(event.target.value as SimulationMode)}
+            onChange={(event) => setMode(event.target.value as InjectionMode)}
           >
             <option value="single">Single Signal</option>
-            <option value="burst">Burst Simulation</option>
-            <option value="scenario">Scenario Simulation</option>
+            <option value="burst">Burst Injection</option>
+            <option value="scenario">Scenario Injection</option>
           </select>
         </label>
 
@@ -188,7 +192,7 @@ export default function SimulatePage() {
           disabled={running}
           className="rounded bg-zinc-900 px-4 py-2 font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
         >
-          {running ? "Running..." : "Run simulation"}
+          {running ? "Running..." : "Run scenario injection"}
         </button>
       </form>
 

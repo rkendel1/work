@@ -44,7 +44,7 @@ export default async function Home() {
             <li>connect inbox</li>
             <li>forward email</li>
             <li>ingest webhook</li>
-            <li>simulate data instantly</li>
+            <li>inject scenario signals instantly</li>
           </ul>
         </section>
         <section className="flex flex-wrap gap-3">
@@ -55,7 +55,7 @@ export default async function Home() {
             Sign up
           </Link>
           <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
-            Run Simulation
+            Inject Scenario
           </Link>
           <Link href="/" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             View Live Feed
@@ -73,13 +73,13 @@ export default async function Home() {
   return (
     <main className="space-y-4 p-4">
       <header className="rounded-lg border bg-white p-4 dark:bg-zinc-800 dark:border-zinc-700">
-        <h1 className="text-2xl font-semibold">Live Operations Feed</h1>
+        <h1 className="text-2xl font-semibold">Live Operations Stream</h1>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          Tenant-scoped real-time inbox, meaning, work, and execution.
+          Tenant-scoped continuous operational stream with meaning and action layers.
         </p>
         <div className="mt-3 flex gap-3 text-sm">
           <Link href="/simulate" className="underline dark:text-zinc-300">
-            Run Simulation
+            Scenario Injection
           </Link>
           <Link href="/sign-in" className="underline dark:text-zinc-300">
             Sign in

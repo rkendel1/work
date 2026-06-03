@@ -294,7 +294,6 @@ export function InboxClient({
   );
   const [contextViewMode, setContextViewMode] = useState<ContextViewMode>("operational");
   const [tenantId, setTenantId] = useState("default");
-  const [source, setSource] = useState("manual");
   const [content, setContent] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxItem[]>(initialInboxItems);
   const [workItems, setWorkItems] = useState<WorkItem[]>(initialWorkItems);
@@ -459,7 +458,7 @@ export function InboxClient({
       const response = await fetch("/api/ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, content, tenantId }),
+        body: JSON.stringify({ source: "api", content, tenantId }),
       });
 
       if (!response.ok) {
@@ -856,7 +855,7 @@ export function InboxClient({
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-6">
       <header className="space-y-3">
-        <h1 className="text-3xl font-semibold">Operations Inbox</h1>
+        <h1 className="text-3xl font-semibold">Live Operations Stream</h1>
         <div className="flex flex-wrap items-center gap-2">
           {(["inbox", "work", "actions", "organization", "rules", "truth", "settings"] as Tab[]).map((name) => (
             <button
@@ -867,7 +866,15 @@ export function InboxClient({
                 tab === name ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900" : "bg-white dark:bg-zinc-800"
               }`}
             >
-              {name}
+              {{
+                inbox: "stream",
+                work: "action layer",
+                actions: "catalog",
+                organization: "org",
+                rules: "rules",
+                truth: "meaning",
+                settings: "setup",
+              }[name]}
             </button>
           ))}
           <div className="ml-auto flex items-center gap-1 rounded border dark:border-zinc-700 p-1 text-xs dark:bg-zinc-800">
@@ -913,7 +920,7 @@ export function InboxClient({
       {tab === "inbox" ? (
         <>
           <section className="space-y-4 rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
-            <h2 className="text-lg font-semibold dark:text-zinc-100">Live Operational Feed (Inferred)</h2>
+            <h2 className="text-lg font-semibold dark:text-zinc-100">Live Operations Stream</h2>
             <div className="grid gap-4 md:grid-cols-2">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -969,23 +976,14 @@ export function InboxClient({
               <div className="mt-2 flex flex-wrap gap-2">
                 <button type="button" className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">Connect Email (Postmark)</button>
                 <a href={`mailto:${inboundAddress}`} className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">Send Test Email</a>
-                <button type="button" onClick={() => setSource("simulation")} className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">
-                  Use Simulation Mode
-                </button>
+                <a href="/simulate" className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">
+                  Scenario Injection
+                </a>
               </div>
             </div>
           </section>
 
           <form onSubmit={onSubmit} className="space-y-3 rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
-            <label className="block text-sm font-medium dark:text-zinc-300" htmlFor="source">
-              Signal source
-            </label>
-            <input
-              id="source"
-              value={source}
-              onChange={(event) => setSource(event.target.value)}
-              className="w-full rounded border dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100 px-3 py-2"
-            />
             <label className="block text-sm font-medium dark:text-zinc-300" htmlFor="content">
               Feed operational signal
             </label>
@@ -1007,7 +1005,7 @@ export function InboxClient({
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <section className="rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
-              <h2 className="mb-3 text-lg font-semibold dark:text-zinc-100">Inbox</h2>
+              <h2 className="mb-3 text-lg font-semibold dark:text-zinc-100">Operational Stream</h2>
               <div className="space-y-2">
                 {inboxItems.map((item) => (
                   <button
@@ -1019,10 +1017,13 @@ export function InboxClient({
                     }`}
                   >
                     <div className="mb-1 flex items-center justify-between gap-2">
-                      <p className="font-medium dark:text-zinc-100">{item.source}</p>
+                    <p className="font-medium dark:text-zinc-100">Operational signal</p>
                       <IngressStatusBadge status={item.status} />
                     </div>
                     <p className="line-clamp-2 text-zinc-600 dark:text-zinc-400">{item.content}</p>
+                  {contextViewMode === "raw" ? (
+                    <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">source: {item.source}</p>
+                  ) : null}
                   </button>
                 ))}
               </div>
