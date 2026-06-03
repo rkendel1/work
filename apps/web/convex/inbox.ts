@@ -37,6 +37,29 @@ export const ingestInboxItem = mutationGeneric({
   },
 });
 
+export const createSignalEvent = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    sourceType: v.string(),
+    rawPayload: v.any(),
+    normalizedContent: v.string(),
+    metadata: v.object({
+      sender: v.optional(v.string()),
+      timestamp: v.number(),
+      channel: v.optional(v.string()),
+    }),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("signal_events", {
+      tenantId: args.tenantId,
+      sourceType: args.sourceType,
+      rawPayload: args.rawPayload,
+      normalizedContent: args.normalizedContent,
+      metadata: args.metadata,
+    });
+  },
+});
+
 export const createIngressEvent = mutationGeneric({
   args: {
     tenantId: v.string(),

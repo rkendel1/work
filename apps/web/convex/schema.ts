@@ -2,6 +2,17 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  signal_events: defineTable({
+    tenantId: v.string(),
+    sourceType: v.string(),
+    rawPayload: v.any(),
+    normalizedContent: v.string(),
+    metadata: v.object({
+      sender: v.optional(v.string()),
+      timestamp: v.number(),
+      channel: v.optional(v.string()),
+    }),
+  }),
   inbox_items: defineTable({
     tenantId: v.string(),
     externalId: v.string(),

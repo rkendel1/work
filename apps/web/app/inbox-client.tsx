@@ -489,7 +489,7 @@ export function InboxClient({
         <>
           <form onSubmit={onSubmit} className="space-y-3 rounded-lg border p-4">
             <label className="block text-sm font-medium" htmlFor="source">
-              Source
+              Signal source
             </label>
             <input
               id="source"
@@ -498,7 +498,7 @@ export function InboxClient({
               className="w-full rounded border px-3 py-2"
             />
             <label className="block text-sm font-medium" htmlFor="content">
-              Paste something operational
+              Feed operational signal
             </label>
             <textarea
               id="content"
@@ -512,7 +512,7 @@ export function InboxClient({
               disabled={loading}
               className="rounded bg-black px-4 py-2 text-white disabled:opacity-60"
             >
-              {loading ? "Submitting..." : "Submit"}
+              {loading ? "Feeding..." : "Feed signal"}
             </button>
           </form>
 
