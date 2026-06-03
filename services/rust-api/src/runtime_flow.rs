@@ -70,9 +70,16 @@ pub(super) fn ingest_signal_to_inbox(
     let received_event = state.ingress_events.last().cloned();
 
     event_bus.publish(DomainEvent::SignalReceived {
-        tenant_id,
+        tenant_id: tenant_id.clone(),
         signal_id: signal_event.id.to_string(),
+        source: source_type,
         content: normalized_content,
+        timestamp: inbox_item.received_at.clone(),
+    });
+    event_bus.publish(DomainEvent::IngressCreated {
+        tenant_id,
+        ingress_id: inbox_item.id.to_string(),
+        signal_id: signal_event.id.to_string(),
     });
 
     SignalIngestionResult {
@@ -148,9 +155,14 @@ pub(super) fn extract_work_from_inbox(
     }
 
     event_bus.publish(DomainEvent::WorkCreated {
-        tenant_id: inbox_item.tenant_id,
+        tenant_id: inbox_item.tenant_id.clone(),
         work_id: work_item.id.to_string(),
         signal_id: inbox_item.id.to_string(),
+    });
+    event_bus.publish(DomainEvent::WorkRouted {
+        tenant_id: inbox_item.tenant_id,
+        work_id: work_item.id.to_string(),
+        route: work_item.assigned_org_unit_id.to_string(),
     });
 
     Ok(WorkExtractionResult {
@@ -166,11 +178,13 @@ pub(super) fn emit_action_executed_event(
     tenant_id: &str,
     execution_id: Uuid,
     action_id: Uuid,
+    result: &str,
 ) {
     event_bus.publish(DomainEvent::ActionExecuted {
         tenant_id: tenant_id.to_string(),
         execution_id: execution_id.to_string(),
         action_id: action_id.to_string(),
+        result: result.to_string(),
     });
 }
 
@@ -205,10 +219,13 @@ mod tests {
         let events = event_bus.drain();
 
         assert_eq!(result.inbox_item.content, "HVAC alarm");
+        assert!(events.iter().any(
+            |event| matches!(event, DomainEvent::SignalReceived { source, .. } if source == "api")
+        ));
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, DomainEvent::SignalReceived { .. }))
+                .any(|event| matches!(event, DomainEvent::IngressCreated { .. }))
         );
     }
 
@@ -252,6 +269,11 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, DomainEvent::WorkCreated { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::WorkRouted { .. }))
         );
     }
 }
