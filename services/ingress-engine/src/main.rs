@@ -120,6 +120,36 @@ struct ActionDefinition {
     active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClassificationDefinition {
+    tenant_id: String,
+    #[serde(rename = "type")]
+    classification_type: String,
+    description: String,
+}
+
+#[derive(Debug, Clone)]
+struct PackClassification {
+    classification_type: &'static str,
+    description: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct PackAction {
+    name: &'static str,
+    description: &'static str,
+    category: &'static str,
+    classification_types: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct OperationalPack {
+    vertical: &'static str,
+    industry: &'static str,
+    classifications: Vec<PackClassification>,
+    actions: Vec<PackAction>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTenantRequest {
@@ -145,6 +175,7 @@ struct State {
     work_items: Vec<WorkItem>,
     tenants: Vec<Tenant>,
     actions: Vec<ActionDefinition>,
+    classifications: Vec<ClassificationDefinition>,
 }
 
 const DEFAULT_TENANT_ID: &str = "default";
@@ -160,11 +191,9 @@ impl Default for State {
             vertical: "Property Management".to_string(),
             industry: "Commercial Real Estate".to_string(),
         };
-        let actions = default_actions_for(
-            &default_tenant.id,
-            "Property Management",
-            "Commercial Real Estate",
-        );
+        let default_pack = load_pack("Property Management", "Commercial Real Estate");
+        let actions = actions_from_pack(&default_tenant.id, &default_pack);
+        let classifications = classifications_from_pack(&default_tenant.id, &default_pack);
 
         Self {
             inbox_items: Vec::new(),
@@ -172,6 +201,7 @@ impl Default for State {
             work_items: Vec::new(),
             tenants: vec![default_tenant],
             actions,
+            classifications,
         }
     }
 }
@@ -302,62 +332,202 @@ fn resolve_tenant_id(tenant_id: Option<&str>) -> String {
         .to_string()
 }
 
-fn default_actions_for(tenant_id: &str, vertical: &str, industry: &str) -> Vec<ActionDefinition> {
-    let mut actions = vec![
-        ActionDefinition {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            name: "Inspect HVAC Unit".to_string(),
-            description: "Send technician to inspect HVAC equipment.".to_string(),
-            category: "maintenance".to_string(),
-            classification_types: vec!["maintenance_request".to_string()],
-            active: true,
-        },
-        ActionDefinition {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            name: "Review Invoice".to_string(),
-            description: "Review invoice details and validate disputed line items.".to_string(),
-            category: "review".to_string(),
-            classification_types: vec!["billing_inquiry".to_string()],
-            active: true,
-        },
-        ActionDefinition {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            name: "Send Appointment Options".to_string(),
-            description: "Provide available appointment options and confirmation path.".to_string(),
-            category: "scheduling".to_string(),
-            classification_types: vec!["scheduling_request".to_string()],
-            active: true,
-        },
-    ];
-
+fn load_pack(vertical: &str, industry: &str) -> OperationalPack {
     if vertical.eq_ignore_ascii_case("Property Management")
         && industry.eq_ignore_ascii_case("Commercial Real Estate")
     {
-        actions.push(ActionDefinition {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            name: "Dispatch Vendor".to_string(),
-            description: "Coordinate approved vendor dispatch for building maintenance."
-                .to_string(),
-            category: "maintenance".to_string(),
-            classification_types: vec!["maintenance_request".to_string()],
-            active: true,
-        });
-        actions.push(ActionDefinition {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            name: "Schedule Repair".to_string(),
-            description: "Schedule repair window with onsite operations and vendor.".to_string(),
-            category: "scheduling".to_string(),
-            classification_types: vec!["maintenance_request".to_string()],
-            active: true,
-        });
+        return OperationalPack {
+            vertical: "Property Management",
+            industry: "Commercial Real Estate",
+            classifications: vec![
+                PackClassification {
+                    classification_type: "maintenance_request",
+                    description: "Issue requiring onsite maintenance or repair.",
+                },
+                PackClassification {
+                    classification_type: "tenant_complaint",
+                    description: "Tenant complaint requiring operational response.",
+                },
+                PackClassification {
+                    classification_type: "lease_question",
+                    description: "Question related to lease terms or conditions.",
+                },
+                PackClassification {
+                    classification_type: "access_request",
+                    description: "Request for building or suite access.",
+                },
+                PackClassification {
+                    classification_type: "vendor_coordination",
+                    description: "Coordination request with external vendors.",
+                },
+            ],
+            actions: vec![
+                PackAction {
+                    name: "Inspect HVAC Unit",
+                    description: "Send technician to inspect HVAC equipment.",
+                    category: "maintenance",
+                    classification_types: vec!["maintenance_request"],
+                },
+                PackAction {
+                    name: "Dispatch Maintenance Vendor",
+                    description: "Coordinate approved vendor dispatch for maintenance.",
+                    category: "maintenance",
+                    classification_types: vec!["maintenance_request", "vendor_coordination"],
+                },
+                PackAction {
+                    name: "Respond to Tenant",
+                    description: "Provide tenant response and expected next steps.",
+                    category: "response",
+                    classification_types: vec!["tenant_complaint", "lease_question"],
+                },
+                PackAction {
+                    name: "Schedule Inspection",
+                    description: "Schedule onsite inspection with operations staff.",
+                    category: "scheduling",
+                    classification_types: vec!["maintenance_request", "access_request"],
+                },
+                PackAction {
+                    name: "Create Work Order",
+                    description: "Open a tracked work order for follow-up.",
+                    category: "maintenance",
+                    classification_types: vec!["tenant_complaint"],
+                },
+                PackAction {
+                    name: "Escalate to Property Manager",
+                    description: "Escalate high-priority case to property management.",
+                    category: "escalation",
+                    classification_types: vec!["tenant_complaint", "lease_question"],
+                },
+            ],
+        };
     }
 
-    actions
+    if vertical.eq_ignore_ascii_case("Healthcare") && industry.eq_ignore_ascii_case("Clinic") {
+        return OperationalPack {
+            vertical: "Healthcare",
+            industry: "Clinic",
+            classifications: vec![
+                PackClassification {
+                    classification_type: "appointment_request",
+                    description: "Patient request for scheduling or rescheduling.",
+                },
+                PackClassification {
+                    classification_type: "patient_issue",
+                    description: "Patient issue requiring clinical attention.",
+                },
+                PackClassification {
+                    classification_type: "facility_issue",
+                    description: "Facility issue requiring operational response.",
+                },
+                PackClassification {
+                    classification_type: "billing_question",
+                    description: "Billing or claims related inquiry.",
+                },
+            ],
+            actions: vec![
+                PackAction {
+                    name: "Schedule Appointment",
+                    description: "Schedule patient appointment with available slots.",
+                    category: "scheduling",
+                    classification_types: vec!["appointment_request", "scheduling_request"],
+                },
+                PackAction {
+                    name: "Notify Clinical Staff",
+                    description: "Notify clinical team about patient issue.",
+                    category: "clinical",
+                    classification_types: vec!["patient_issue"],
+                },
+                PackAction {
+                    name: "Resolve Billing Inquiry",
+                    description: "Resolve billing and claims inquiries.",
+                    category: "billing",
+                    classification_types: vec!["billing_question", "billing_inquiry"],
+                },
+                PackAction {
+                    name: "Escalate to Provider",
+                    description: "Escalate patient concern to provider.",
+                    category: "escalation",
+                    classification_types: vec!["patient_issue"],
+                },
+            ],
+        };
+    }
+
+    OperationalPack {
+        vertical: "Custom",
+        industry: "General",
+        classifications: vec![
+            PackClassification {
+                classification_type: "maintenance_request",
+                description: "Issue requiring onsite maintenance or repair.",
+            },
+            PackClassification {
+                classification_type: "billing_inquiry",
+                description: "Billing inquiry requiring review.",
+            },
+            PackClassification {
+                classification_type: "scheduling_request",
+                description: "Scheduling request that needs operational follow-up.",
+            },
+            PackClassification {
+                classification_type: "operational_request",
+                description: "General operational request.",
+            },
+        ],
+        actions: vec![
+            PackAction {
+                name: "Inspect HVAC Unit",
+                description: "Send technician to inspect HVAC equipment.",
+                category: "maintenance",
+                classification_types: vec!["maintenance_request"],
+            },
+            PackAction {
+                name: "Review Invoice",
+                description: "Review invoice details and validate disputed line items.",
+                category: "review",
+                classification_types: vec!["billing_inquiry"],
+            },
+            PackAction {
+                name: "Send Appointment Options",
+                description: "Provide available appointment options and confirmation path.",
+                category: "scheduling",
+                classification_types: vec!["scheduling_request"],
+            },
+        ],
+    }
+}
+
+fn actions_from_pack(tenant_id: &str, pack: &OperationalPack) -> Vec<ActionDefinition> {
+    pack.actions
+        .iter()
+        .map(|action| ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: action.name.to_string(),
+            description: action.description.to_string(),
+            category: action.category.to_string(),
+            classification_types: action
+                .classification_types
+                .iter()
+                .map(|classification_type| classification_type.to_string())
+                .collect(),
+            active: true,
+        })
+        .collect()
+}
+
+fn classifications_from_pack(
+    tenant_id: &str,
+    pack: &OperationalPack,
+) -> Vec<ClassificationDefinition> {
+    pack.classifications
+        .iter()
+        .map(|classification| ClassificationDefinition {
+            tenant_id: tenant_id.to_string(),
+            classification_type: classification.classification_type.to_string(),
+            description: classification.description.to_string(),
+        })
+        .collect()
 }
 
 fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
@@ -380,7 +550,7 @@ fn tenant_recommendations(
     tenant_id: &str,
     classification_type: &str,
 ) -> Vec<RecommendedAction> {
-    state
+    let tenant_actions: Vec<RecommendedAction> = state
         .actions
         .iter()
         .filter(|action| {
@@ -390,6 +560,30 @@ fn tenant_recommendations(
                     .classification_types
                     .iter()
                     .any(|action_type| action_type == classification_type)
+        })
+        .map(|action| RecommendedAction {
+            title: action.name.clone(),
+            description: action.description.clone(),
+            action_type: ActionType::from_category(&action.category),
+        })
+        .collect();
+
+    if !tenant_actions.is_empty() {
+        return tenant_actions;
+    }
+
+    let Some(tenant) = state.tenants.iter().find(|tenant| tenant.id == tenant_id) else {
+        return tenant_actions;
+    };
+
+    let pack = load_pack(&tenant.vertical, &tenant.industry);
+    actions_from_pack(tenant_id, &pack)
+        .iter()
+        .filter(|action| {
+            action
+                .classification_types
+                .iter()
+                .any(|item| item == classification_type)
         })
         .map(|action| RecommendedAction {
             title: action.name.clone(),
@@ -618,6 +812,24 @@ struct ConvexUpdateIngressStatusArgs {
     created_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexTenantArgs {
+    id: String,
+    slug: String,
+    display_name: String,
+    vertical: String,
+    industry: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexBootstrapTenantFromPackArgs {
+    tenant_id: String,
+    vertical: String,
+    industry: String,
+}
+
 async fn send_convex_mutation<T: Serialize>(
     client: &Client,
     convex_config: &ConvexConfig,
@@ -753,6 +965,44 @@ async fn forward_status_update_to_convex(
         },
     )
     .await
+}
+
+async fn forward_tenant_bootstrap_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    tenant: &Tenant,
+) {
+    if let Err(error) = send_convex_mutation(
+        client,
+        convex_config,
+        "actions:createTenant",
+        ConvexTenantArgs {
+            id: tenant.id.clone(),
+            slug: tenant.slug.clone(),
+            display_name: tenant.display_name.clone(),
+            vertical: tenant.vertical.clone(),
+            industry: tenant.industry.clone(),
+        },
+    )
+    .await
+    {
+        eprintln!("failed to seed tenant in convex: {error}");
+    }
+
+    if let Err(error) = send_convex_mutation(
+        client,
+        convex_config,
+        "actions:bootstrapTenantFromPack",
+        ConvexBootstrapTenantFromPackArgs {
+            tenant_id: tenant.id.clone(),
+            vertical: tenant.vertical.clone(),
+            industry: tenant.industry.clone(),
+        },
+    )
+    .await
+    {
+        eprintln!("failed to bootstrap tenant pack in convex: {error}");
+    }
 }
 
 async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) -> impl Responder {
@@ -1002,18 +1252,22 @@ async fn create_tenant(
         id = format!("{id}_{}", Uuid::new_v4().simple());
     }
 
+    let pack = load_pack(vertical, industry);
     let tenant = Tenant {
         id: id.clone(),
         slug,
         display_name: name.to_string(),
-        vertical: vertical.to_string(),
-        industry: industry.to_string(),
+        vertical: pack.vertical.to_string(),
+        industry: pack.industry.to_string(),
     };
     state.tenants.push(tenant.clone());
+    state.actions.extend(actions_from_pack(&id, &pack));
     state
-        .actions
-        .extend(default_actions_for(&id, vertical, industry));
+        .classifications
+        .extend(classifications_from_pack(&id, &pack));
+    drop(state);
 
+    forward_tenant_bootstrap_to_convex(&data.client, &data.convex_config, &tenant).await;
     HttpResponse::Created().json(tenant)
 }
 
@@ -1071,7 +1325,7 @@ async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase);
     let state = lock_state(&data);
-    let actions: Vec<ActionDefinition> = state
+    let mut actions: Vec<ActionDefinition> = state
         .actions
         .iter()
         .filter(|action| action.tenant_id == tenant_id)
@@ -1087,6 +1341,25 @@ async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>)
         })
         .cloned()
         .collect();
+
+    if actions.is_empty() {
+        if let Some(tenant) = state.tenants.iter().find(|tenant| tenant.id == tenant_id) {
+            let pack = load_pack(&tenant.vertical, &tenant.industry);
+            actions = actions_from_pack(&tenant_id, &pack)
+                .into_iter()
+                .filter(|action| {
+                    if let Some(classification_type) = &classification_type {
+                        action
+                            .classification_types
+                            .iter()
+                            .any(|item| item == classification_type)
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+        }
+    }
 
     HttpResponse::Ok().json(actions)
 }
@@ -1415,7 +1688,49 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|action| action.name == "Dispatch Vendor")
+                .any(|action| action.name == "Dispatch Maintenance Vendor")
+        );
+    }
+
+    #[actix_web::test]
+    async fn falls_back_to_pack_actions_when_tenant_action_catalog_is_empty() {
+        let app_state = test_state();
+        {
+            let mut state = lock_state(&app_state);
+            state.tenants.push(Tenant {
+                id: "clinic-tenant".to_string(),
+                slug: "clinic-tenant".to_string(),
+                display_name: "Clinic Tenant".to_string(),
+                vertical: "Healthcare".to_string(),
+                industry: "Clinic".to_string(),
+            });
+        }
+        let app = test::init_service(App::new().app_data(app_state).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "Please schedule an appointment for tomorrow",
+                "tenantId": "clinic-tenant"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        assert_eq!(work_item.classification_type, "scheduling_request");
+        assert!(
+            work_item
+                .recommended_actions
+                .iter()
+                .any(|action| action.title == "Schedule Appointment")
         );
     }
 }

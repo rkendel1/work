@@ -64,6 +64,51 @@ type InboxClientProps = {
 
 type Tab = "inbox" | "work" | "actions" | "settings";
 
+type SetupPack = {
+  vertical: string;
+  industries: string[];
+  classifications: string[];
+};
+
+const SETUP_PACKS: SetupPack[] = [
+  {
+    vertical: "Property Management",
+    industries: ["Commercial Real Estate", "Residential"],
+    classifications: [
+      "maintenance_request",
+      "tenant_complaint",
+      "lease_question",
+      "access_request",
+      "vendor_coordination",
+    ],
+  },
+  {
+    vertical: "Healthcare",
+    industries: ["Clinic", "Urgent Care"],
+    classifications: [
+      "appointment_request",
+      "patient_issue",
+      "facility_issue",
+      "billing_question",
+    ],
+  },
+  {
+    vertical: "Education",
+    industries: ["K-12", "Higher Education"],
+    classifications: ["facility_issue", "staff_request", "student_support_request"],
+  },
+  {
+    vertical: "Manufacturing",
+    industries: ["Discrete Manufacturing", "Process Manufacturing"],
+    classifications: ["equipment_issue", "safety_incident", "supply_chain_issue"],
+  },
+  {
+    vertical: "Custom",
+    industries: ["General"],
+    classifications: ["operational_request"],
+  },
+];
+
 export function InboxClient({
   initialInboxItems,
   initialWorkItems,
@@ -96,8 +141,11 @@ export function InboxClient({
     "maintenance_request",
   );
   const [tenantName, setTenantName] = useState("");
-  const [tenantVertical, setTenantVertical] = useState("Property Management");
-  const [tenantIndustry, setTenantIndustry] = useState("Commercial Real Estate");
+  const [tenantVertical, setTenantVertical] = useState(SETUP_PACKS[0].vertical);
+  const [tenantIndustry, setTenantIndustry] = useState(SETUP_PACKS[0].industries[0]);
+  const [setupMessage, setSetupMessage] = useState<string | null>(null);
+  const selectedSetupPack =
+    SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
   const refresh = useCallback(async () => {
     const tenantQuery = `tenantId=${encodeURIComponent(tenantId)}`;
@@ -208,6 +256,7 @@ export function InboxClient({
   async function onCreateTenant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setSetupMessage(null);
 
     const response = await fetch("/api/tenants", {
       method: "POST",
@@ -227,6 +276,10 @@ export function InboxClient({
     const tenant = (await response.json()) as Tenant;
     setTenantName("");
     setTenantId(tenant.id);
+    setTab("inbox");
+    setSetupMessage(
+      `We've configured your Operations Inbox for ${tenant.vertical} • ${tenant.industry}.`,
+    );
   }
 
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
@@ -418,7 +471,27 @@ export function InboxClient({
 
       {tab === "settings" ? (
         <section className="rounded-lg border p-4">
-          <h2 className="mb-3 text-lg font-semibold">Tenant Setup</h2>
+          <h2 className="mb-3 text-lg font-semibold">Setup Experience</h2>
+          <p className="mb-3 text-sm text-zinc-600">
+            What kind of organization are you?
+          </p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {SETUP_PACKS.map((pack) => (
+              <button
+                key={pack.vertical}
+                type="button"
+                onClick={() => {
+                  setTenantVertical(pack.vertical);
+                  setTenantIndustry(pack.industries[0]);
+                }}
+                className={`rounded border px-3 py-1 text-sm ${
+                  tenantVertical === pack.vertical ? "bg-zinc-900 text-white" : "bg-white"
+                }`}
+              >
+                {pack.vertical}
+              </button>
+            ))}
+          </div>
           <form onSubmit={onCreateTenant} className="grid gap-2 md:grid-cols-2">
             <input
               value={tenantName}
@@ -427,24 +500,35 @@ export function InboxClient({
               placeholder="Organization Name"
               required
             />
-            <input
-              value={tenantVertical}
-              onChange={(event) => setTenantVertical(event.target.value)}
-              className="rounded border px-3 py-2"
-              placeholder="Vertical"
-              required
-            />
-            <input
+            <input value={tenantVertical} className="rounded border px-3 py-2" readOnly />
+            <select
               value={tenantIndustry}
               onChange={(event) => setTenantIndustry(event.target.value)}
               className="rounded border px-3 py-2"
-              placeholder="Industry"
-              required
-            />
+            >
+              {selectedSetupPack.industries.map((industry) => (
+                <option key={industry} value={industry}>
+                  {industry}
+                </option>
+              ))}
+            </select>
             <button type="submit" className="rounded bg-black px-4 py-2 text-white">
               Create Tenant
             </button>
           </form>
+          <p className="mt-4 text-sm font-medium">Incoming Signals ready on day 1</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {selectedSetupPack.classifications.map((classification) => (
+              <span key={classification} className="rounded border px-2 py-1 text-xs">
+                {classification}
+              </span>
+            ))}
+          </div>
+          {setupMessage ? (
+            <p className="mt-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {setupMessage}
+            </p>
+          ) : null}
         </section>
       ) : null}
     </div>
