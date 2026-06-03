@@ -1,6 +1,6 @@
 import { InboxClient, InboxItem, WorkItem } from "@/app/inbox-client";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
-import { tenantSlugFromHost } from "@/lib/tenant-routing";
+import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
 import Link from "next/link";
 import { headers } from "next/headers";
 
@@ -25,7 +25,7 @@ export default async function Home() {
   const headerStore = await headers();
   const host = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
   const authBypassEnabled = process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true";
-  const tenantSlug = tenantSlugFromHost(host);
+  const tenantSlug = tenantSlugFromHost(host) ?? (isRootHost(host) ? "default" : null);
   const tenantId =
     headerStore.get("x-tenant-id") ??
     (authBypassEnabled && (!tenantSlug || tenantSlug === "default") ? "default" : undefined);

@@ -5,7 +5,7 @@ const DEFAULT_SIMULATION_TENANTS = [
   {
     id: "default",
     slug: "default",
-    domain: "default.canonflo.com",
+    domain: "www.canonflo.com",
     name: "Default Tenant",
     display_name: "Default Tenant",
     vertical: "Property Management",

@@ -7,7 +7,7 @@ const DEFAULT_TENANTS = [
   {
     id: "default",
     slug: "default",
-    domain: "default.canonflo.com",
+    domain: "www.canonflo.com",
     name: "Default Tenant",
     displayName: "Default Tenant",
     vertical: "Property Management",

@@ -1,11 +1,6 @@
 import { SignUp } from "@clerk/nextjs";
-import { redirect } from "next/navigation";
 
 export default function SignUpPage() {
-  if (process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true") {
-    redirect("/");
-  }
-
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const clerkConfigured =
     clerkPublishableKey &&
@@ -23,7 +18,12 @@ export default function SignUpPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
-      <SignUp path="/sign-up" signInUrl="/sign-in" />
+      <SignUp
+        path="/sign-up"
+        signInUrl="/sign-in"
+        forceRedirectUrl="/onboarding"
+        fallbackRedirectUrl="/onboarding"
+      />
     </main>
   );
 }

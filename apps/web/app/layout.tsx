@@ -13,13 +13,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const authBypassEnabled = process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true";
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const hasValidClerkPublishableKey = Boolean(
     clerkPublishableKey && /^pk_(test|live)_[A-Za-z0-9_-]+$/.test(clerkPublishableKey),
   );
   const clerkConfigured = Boolean(
-    !authBypassEnabled &&
     hasValidClerkPublishableKey &&
       (process.env.NODE_ENV !== "development" ||
         process.env.NEXT_PUBLIC_ENABLE_CLERK_IN_DEV === "true"),
