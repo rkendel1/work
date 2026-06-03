@@ -1,16 +1,13 @@
 #[path = "../src/main.rs"]
 mod api;
 
-use actix_web::{App, test, web};
+use actix_web::test;
 
 #[actix_web::test]
 async fn router_must_expose_core_surface() {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(api::AppState::new(api::ConvexConfig::default())))
-            .configure(api::routes::app_config)
-            .route("/__router", web::get().to(|| async { "router=app_config::ACTIVE" })),
-    )
+    let app = test::init_service(api::build_app(actix_web::web::Data::new(
+        api::AppState::new(api::ConvexConfig::default()),
+    )))
     .await;
 
     let health_req = test::TestRequest::get().uri("/health").to_request();

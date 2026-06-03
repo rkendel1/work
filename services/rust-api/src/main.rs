@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
-mod recommendation_engine;
 mod config;
+mod recommendation_engine;
 pub(crate) mod routes;
 use config::Config;
 use routes::app_config;
@@ -1542,13 +1542,18 @@ fn parse_priority_override(rule_text_lower: &str) -> Option<String> {
     if rule_text_lower.contains("priority = low") || rule_text_lower.contains("low priority") {
         return Some("low".to_string());
     }
-    if rule_text_lower.contains("priority = medium") || rule_text_lower.contains("medium priority") {
+    if rule_text_lower.contains("priority = medium") || rule_text_lower.contains("medium priority")
+    {
         return Some("medium".to_string());
     }
     None
 }
 
-fn evaluate_rule(rule_text: &str, context: &RuleEvaluationContext<'_>, state: &State) -> RuleEffect {
+fn evaluate_rule(
+    rule_text: &str,
+    context: &RuleEvaluationContext<'_>,
+    state: &State,
+) -> RuleEffect {
     let rule_text_lower = rule_text.to_lowercase();
     let content_lower = context.content.to_lowercase();
     let classification_lower = context.classification_type.to_lowercase();
@@ -1643,11 +1648,17 @@ fn apply_business_rules(
         .filter(|rule| {
             rule.tenant_id == tenant_id
                 && rule.active
-                && (rule.org_unit_id.is_none() || rule.org_unit_id == Some(context.assigned_org_unit_id))
+                && (rule.org_unit_id.is_none()
+                    || rule.org_unit_id == Some(context.assigned_org_unit_id))
         })
         .cloned()
         .collect();
-    rules.sort_by(|left, right| right.priority.cmp(&left.priority).then(left.id.cmp(&right.id)));
+    rules.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then(left.id.cmp(&right.id))
+    });
 
     for rule in rules {
         let effect = evaluate_rule(&rule.rule_text, context, state);
@@ -2261,10 +2272,8 @@ async fn forward_work_to_convex(
                     action_type: action.action_type.as_str().to_string(),
                 })
                 .collect(),
-            operational_meaning: work_item
-                .operational_meaning
-                .as_ref()
-                .map(|meaning| ConvexOperationalMeaning {
+            operational_meaning: work_item.operational_meaning.as_ref().map(|meaning| {
+                ConvexOperationalMeaning {
                     system_concept: meaning.system_concept.clone(),
                     inferred_meaning: meaning.inferred_meaning.clone(),
                     state: meaning.state.clone(),
@@ -2272,7 +2281,8 @@ async fn forward_work_to_convex(
                     evidence: meaning.evidence.clone(),
                     crosswalk_version: meaning.crosswalk_version.clone(),
                     updated_at: meaning.updated_at,
-                }),
+                }
+            }),
         },
     )
     .await
@@ -2978,7 +2988,8 @@ async fn create_tenant(
         {
             eprintln!("failed to forward onboarding ingress event to convex: {error}");
         }
-        if let Err(error) = forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
+        if let Err(error) =
+            forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
         {
             eprintln!("failed to forward onboarding work item to convex: {error}");
         }
@@ -3103,7 +3114,12 @@ async fn list_business_rules(
         })
         .cloned()
         .collect();
-    rules.sort_by(|left, right| right.priority.cmp(&left.priority).then(left.id.cmp(&right.id)));
+    rules.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then(left.id.cmp(&right.id))
+    });
     HttpResponse::Ok().json(rules)
 }
 
@@ -3816,8 +3832,10 @@ fn infer_behavioral_patterns(state: &State, tenant_id: &str) -> Vec<BehavioralPa
             .unwrap_or((Uuid::nil(), 0));
         let ratio = count as f64 / unresolved_work_items.len() as f64;
         if ratio >= 0.5 {
-            let unresolved_ingress_ids: HashSet<Uuid> =
-                unresolved_work_items.iter().map(|work_item| work_item.inbox_item_id).collect();
+            let unresolved_ingress_ids: HashSet<Uuid> = unresolved_work_items
+                .iter()
+                .map(|work_item| work_item.inbox_item_id)
+                .collect();
             let first_observed_at = state
                 .ingress_events
                 .iter()
@@ -3900,7 +3918,8 @@ fn format_process_name(classification_type: &str) -> String {
             let mut chars = segment.chars();
             match chars.next() {
                 Some(first) => {
-                    first.to_uppercase().collect::<String>() + chars.as_str().to_lowercase().as_str()
+                    first.to_uppercase().collect::<String>()
+                        + chars.as_str().to_lowercase().as_str()
                 }
                 None => String::new(),
             }
@@ -3987,41 +4006,43 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
 
     let mut node_ids_by_name: HashMap<String, Uuid> = HashMap::new();
     let mut process_nodes: Vec<ProcessNode> = Vec::new();
-    let mut ensure_node = |name: &str,
-                           node_type: &str,
-                           source: &str,
-                           confidence: f64,
-                           org_unit_id: Option<Uuid>| {
-        if let Some(existing_id) = node_ids_by_name.get(name) {
-            if let Some(existing_node) = process_nodes.iter_mut().find(|node| node.id == *existing_id) {
-                existing_node.confidence = existing_node.confidence.max(confidence);
-                existing_node.first_seen_at = existing_node.first_seen_at.min(now);
-                existing_node.last_seen_at = existing_node.last_seen_at.max(now);
-                existing_node.source = source.to_string();
-                existing_node.org_unit_id = org_unit_id;
+    let mut ensure_node =
+        |name: &str, node_type: &str, source: &str, confidence: f64, org_unit_id: Option<Uuid>| {
+            if let Some(existing_id) = node_ids_by_name.get(name) {
+                if let Some(existing_node) = process_nodes
+                    .iter_mut()
+                    .find(|node| node.id == *existing_id)
+                {
+                    existing_node.confidence = existing_node.confidence.max(confidence);
+                    existing_node.first_seen_at = existing_node.first_seen_at.min(now);
+                    existing_node.last_seen_at = existing_node.last_seen_at.max(now);
+                    existing_node.source = source.to_string();
+                    existing_node.org_unit_id = org_unit_id;
+                }
+                *existing_id
+            } else {
+                let id = Uuid::new_v4();
+                process_nodes.push(ProcessNode {
+                    id,
+                    tenant_id: tenant_id.to_string(),
+                    org_unit_id,
+                    name: name.to_string(),
+                    node_type: node_type.to_string(),
+                    source: source.to_string(),
+                    confidence: confidence.clamp(0.0, 1.0),
+                    first_seen_at: now,
+                    last_seen_at: now,
+                });
+                node_ids_by_name.insert(name.to_string(), id);
+                id
             }
-            *existing_id
-        } else {
-            let id = Uuid::new_v4();
-            process_nodes.push(ProcessNode {
-                id,
-                tenant_id: tenant_id.to_string(),
-                org_unit_id,
-                name: name.to_string(),
-                node_type: node_type.to_string(),
-                source: source.to_string(),
-                confidence: confidence.clamp(0.0, 1.0),
-                first_seen_at: now,
-                last_seen_at: now,
-            });
-            node_ids_by_name.insert(name.to_string(), id);
-            id
-        }
-    };
+        };
 
     let process_id = ensure_node(&process_name, "process", "inferred", 1.0, None);
     let intake_id = ensure_node("Intake", "step", "inferred", 1.0, None);
-    let maintenance_review_org_unit = tenant_work_items.first().map(|work_item| work_item.assigned_org_unit_id);
+    let maintenance_review_org_unit = tenant_work_items
+        .first()
+        .map(|work_item| work_item.assigned_org_unit_id);
     let maintenance_review_id = ensure_node(
         "Maintenance Review",
         "step",
@@ -4038,29 +4059,30 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
     );
 
     let mut process_edges: Vec<ProcessEdge> = Vec::new();
-    let mut add_edge = |from_node_id: Uuid, to_node_id: Uuid, transition_type: &str, frequency: f64| {
-        if frequency <= 0.0 {
-            return;
-        }
-        if let Some(existing_edge) = process_edges.iter_mut().find(|edge| {
-            edge.from_node_id == from_node_id
-                && edge.to_node_id == to_node_id
-                && edge.transition_type == transition_type
-        }) {
-            existing_edge.frequency += frequency;
-            existing_edge.confidence = (existing_edge.frequency / denominator).clamp(0.0, 1.0);
-            return;
-        }
-        process_edges.push(ProcessEdge {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            from_node_id,
-            to_node_id,
-            transition_type: transition_type.to_string(),
-            frequency,
-            confidence: (frequency / denominator).clamp(0.0, 1.0),
-        });
-    };
+    let mut add_edge =
+        |from_node_id: Uuid, to_node_id: Uuid, transition_type: &str, frequency: f64| {
+            if frequency <= 0.0 {
+                return;
+            }
+            if let Some(existing_edge) = process_edges.iter_mut().find(|edge| {
+                edge.from_node_id == from_node_id
+                    && edge.to_node_id == to_node_id
+                    && edge.transition_type == transition_type
+            }) {
+                existing_edge.frequency += frequency;
+                existing_edge.confidence = (existing_edge.frequency / denominator).clamp(0.0, 1.0);
+                return;
+            }
+            process_edges.push(ProcessEdge {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                from_node_id,
+                to_node_id,
+                transition_type: transition_type.to_string(),
+                frequency,
+                confidence: (frequency / denominator).clamp(0.0, 1.0),
+            });
+        };
 
     add_edge(process_id, intake_id, "normal_flow", denominator);
     add_edge(intake_id, maintenance_review_id, "normal_flow", denominator);
@@ -4080,7 +4102,12 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
             "bypass",
             drifted_selection_count,
         );
-        add_edge(override_id, completion_id, "normal_flow", drifted_selection_count);
+        add_edge(
+            override_id,
+            completion_id,
+            "normal_flow",
+            drifted_selection_count,
+        );
         bypass_paths.push("Maintenance Review → Operations Override".to_string());
     }
 
@@ -4121,14 +4148,23 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
             "external",
             external_execution_count,
         );
-        add_edge(vendor_call_id, completion_id, "normal_flow", external_execution_count);
-        if !bypass_paths.iter().any(|path| path == "Maintenance Review → Vendor Call") {
+        add_edge(
+            vendor_call_id,
+            completion_id,
+            "normal_flow",
+            external_execution_count,
+        );
+        if !bypass_paths
+            .iter()
+            .any(|path| path == "Maintenance Review → Vendor Call")
+        {
             bypass_paths.push("Maintenance Review → Vendor Call".to_string());
         }
     }
 
     let direct_completion_count =
-        (denominator - drifted_selection_count - escalated_work_count - external_execution_count).max(0.0);
+        (denominator - drifted_selection_count - escalated_work_count - external_execution_count)
+            .max(0.0);
     add_edge(
         maintenance_review_id,
         completion_id,
@@ -4169,14 +4205,14 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
         + (unresolved_count / denominator))
         / 4.0;
 
-    state.process_nodes.retain(|node| node.tenant_id != tenant_id);
     state
         .process_nodes
-        .extend(process_nodes.iter().cloned());
-    state.process_edges.retain(|edge| edge.tenant_id != tenant_id);
+        .retain(|node| node.tenant_id != tenant_id);
+    state.process_nodes.extend(process_nodes.iter().cloned());
     state
         .process_edges
-        .extend(process_edges.iter().cloned());
+        .retain(|edge| edge.tenant_id != tenant_id);
+    state.process_edges.extend(process_edges.iter().cloned());
 
     ProcessGraph {
         tenant_id: tenant_id.to_string(),
@@ -4231,7 +4267,8 @@ fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<Operat
         .collect();
     if policy_recommendations.is_empty() {
         policy_recommendations.push(
-            "Maintain current routing policy and continue monitoring for drift signals.".to_string(),
+            "Maintain current routing policy and continue monitoring for drift signals."
+                .to_string(),
         );
     }
 
@@ -4275,7 +4312,10 @@ fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<Operat
         },
         OperationalArtifact {
             tenant_id: tenant_id.to_string(),
-            name: format!("Standard Operating Procedure: {}", process_graph.process_name),
+            name: format!(
+                "Standard Operating Procedure: {}",
+                process_graph.process_name
+            ),
             artifact_type: "SOP".to_string(),
             org_unit_id: None,
             source: "generated".to_string(),
@@ -4366,7 +4406,9 @@ fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<Operat
     state
         .operational_artifacts
         .retain(|artifact| artifact.tenant_id != tenant_id);
-    state.operational_artifacts.extend(artifacts.iter().cloned());
+    state
+        .operational_artifacts
+        .extend(artifacts.iter().cloned());
     artifacts
 }
 
@@ -4377,7 +4419,10 @@ async fn list_operational_artifacts(
     let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
     let mut state = lock_state(&data);
     let artifacts = infer_operational_artifacts(&mut state, &tenant_id);
-    let type_filter = query.artifact_type.as_ref().map(|value| value.to_lowercase());
+    let type_filter = query
+        .artifact_type
+        .as_ref()
+        .map(|value| value.to_lowercase());
     let search_filter = query.q.as_ref().map(|value| value.to_lowercase());
     let filtered: Vec<OperationalArtifact> = artifacts
         .into_iter()
@@ -4390,9 +4435,7 @@ async fn list_operational_artifacts(
             if let Some(filter) = search_filter.as_ref() {
                 let haystack = format!(
                     "{} {} {}",
-                    artifact.name,
-                    artifact.artifact_type,
-                    artifact.content
+                    artifact.name, artifact.artifact_type, artifact.content
                 )
                 .to_lowercase();
                 return haystack.contains(filter);
@@ -4777,18 +4820,31 @@ async fn router_debug() -> impl Responder {
     HttpResponse::Ok().body(ROUTER_ACTIVE_MARKER)
 }
 
+pub(crate) fn build_app(
+    app_state: web::Data<AppState>,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+> {
+    App::new()
+        .app_data(app_state)
+        .configure(app_config)
+        .route("/__router", web::get().to(router_debug))
+}
+
 async fn verify_router_mount(app_state: web::Data<AppState>) -> std::io::Result<()> {
-    let app = actix_web::test::init_service(
-        App::new()
-            .app_data(app_state)
-            .configure(app_config)
-            .route("/__router", web::get().to(router_debug)),
-    )
-    .await;
+    let app = actix_web::test::init_service(build_app(app_state)).await;
 
     let health_response = actix_web::test::call_service(
         &app,
-        actix_web::test::TestRequest::get().uri("/health").to_request(),
+        actix_web::test::TestRequest::get()
+            .uri("/health")
+            .to_request(),
     )
     .await;
     if !health_response.status().is_success() {
@@ -4836,24 +4892,20 @@ async fn main() -> std::io::Result<()> {
     println!("Router sanity check passed: {}", ROUTER_ACTIVE_MARKER);
 
     HttpServer::new(move || {
-        App::new()
-            .wrap(
-                Cors::default()
-                    .allow_any_header()
-                    .allow_any_method()
-                    .allowed_origin("https://canonflo.com")
-                    .allowed_origin("https://www.canonflo.com")
-                    .allowed_origin_fn(|origin, _| {
-                        origin.to_str().unwrap_or("").ends_with(".vercel.app")
-                    }),
-            )
-            .app_data(app_state.clone())
-            .configure(app_config)
-            .route("/__router", web::get().to(router_debug))
+        build_app(app_state.clone()).wrap(
+            Cors::default()
+                .allow_any_header()
+                .allow_any_method()
+                .allowed_origin("https://canonflo.com")
+                .allowed_origin("https://www.canonflo.com")
+                .allowed_origin_fn(|origin, _| {
+                    origin.to_str().unwrap_or("").ends_with(".vercel.app")
+                }),
+        )
     })
-        .bind(format!("0.0.0.0:{port}"))?
-        .run()
-        .await
+    .bind(format!("0.0.0.0:{port}"))?
+    .run()
+    .await
 }
 
 #[cfg(test)]
@@ -4874,7 +4926,7 @@ mod tests {
 
     #[actix_web::test]
     async fn health_endpoint_returns_service_status() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let req = test::TestRequest::get().uri("/health").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
@@ -4888,7 +4940,7 @@ mod tests {
 
     #[actix_web::test]
     async fn status_endpoint_reports_standalone_mode_without_convex() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let req = test::TestRequest::get().uri("/status").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
@@ -4902,12 +4954,7 @@ mod tests {
 
     #[actix_web::test]
     async fn status_endpoint_reports_connected_mode_with_convex() {
-        let app = test::init_service(
-            App::new()
-                .app_data(connected_test_state())
-                .configure(app_config),
-        )
-        .await;
+        let app = test::init_service(build_app(connected_test_state())).await;
 
         let req = test::TestRequest::get().uri("/status").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
@@ -4919,7 +4966,7 @@ mod tests {
 
     #[actix_web::test]
     async fn ingest_get_returns_structured_contract_response() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let req = test::TestRequest::get().uri("/ingest").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
@@ -4932,7 +4979,7 @@ mod tests {
 
     #[actix_web::test]
     async fn ingest_invalid_payload_returns_structured_bad_request_not_500() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let req = test::TestRequest::post()
             .uri("/ingest")
@@ -4950,7 +4997,7 @@ mod tests {
 
     #[actix_web::test]
     async fn simulate_endpoint_returns_stubbed_payload() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let req = test::TestRequest::get().uri("/simulate").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
@@ -4988,7 +5035,7 @@ mod tests {
 
     #[actix_web::test]
     async fn extract_creates_maintenance_work_item() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_payload = IngestRequest {
             source: "email".to_string(),
@@ -5032,7 +5079,7 @@ mod tests {
 
     #[actix_web::test]
     async fn extract_returns_not_found_for_unknown_item() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let extract_req = test::TestRequest::post()
             .uri("/extract")
@@ -5048,7 +5095,7 @@ mod tests {
 
     #[actix_web::test]
     async fn list_endpoints_return_ingested_and_extracted_data() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5083,7 +5130,7 @@ mod tests {
 
     #[actix_web::test]
     async fn postmark_webhook_creates_inbox_and_work_items() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let request = test::TestRequest::post()
             .uri("/webhooks/postmark")
@@ -5119,7 +5166,7 @@ mod tests {
 
     #[actix_web::test]
     async fn signal_ingest_normalizes_webhook_payloads() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let request = test::TestRequest::post()
             .uri("/signals")
@@ -5148,7 +5195,7 @@ mod tests {
 
     #[actix_web::test]
     async fn timeline_endpoint_returns_lifecycle_events_in_order() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5193,7 +5240,7 @@ mod tests {
 
     #[actix_web::test]
     async fn action_selection_and_outcome_close_the_work_loop() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5256,7 +5303,7 @@ mod tests {
 
     #[actix_web::test]
     async fn outcome_rejects_invalid_status() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5288,7 +5335,7 @@ mod tests {
 
     #[actix_web::test]
     async fn tenant_actions_are_used_for_recommendations() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_action_req = test::TestRequest::post()
             .uri("/actions")
@@ -5332,7 +5379,7 @@ mod tests {
 
     #[actix_web::test]
     async fn creating_tenant_provisions_default_actions() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_tenant_req = test::TestRequest::post()
             .uri("/tenants")
@@ -5368,7 +5415,7 @@ mod tests {
 
     #[actix_web::test]
     async fn creating_tenant_accepts_signup_payload_shape() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_tenant_req = test::TestRequest::post()
             .uri("/tenants")
@@ -5386,7 +5433,7 @@ mod tests {
 
     #[actix_web::test]
     async fn creating_tenant_requires_subdomain_or_slug() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_tenant_req = test::TestRequest::post()
             .uri("/tenants")
@@ -5401,7 +5448,7 @@ mod tests {
 
     #[actix_web::test]
     async fn creating_tenant_seeds_onboarding_signals_and_work_items() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_tenant_req = test::TestRequest::post()
             .uri("/tenants")
@@ -5431,7 +5478,11 @@ mod tests {
                 .iter()
                 .all(|item| item.source.eq_ignore_ascii_case("simulation"))
         );
-        assert!(inbox_items.iter().all(|item| item.status == "work_generated"));
+        assert!(
+            inbox_items
+                .iter()
+                .all(|item| item.status == "work_generated")
+        );
     }
 
     #[actix_web::test]
@@ -5450,7 +5501,7 @@ mod tests {
                 created_at: Utc::now().timestamp(),
             });
         }
-        let app = test::init_service(App::new().app_data(app_state).configure(app_config)).await;
+        let app = test::init_service(build_app(app_state)).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5481,7 +5532,7 @@ mod tests {
 
     #[actix_web::test]
     async fn org_units_and_routing_preview_endpoints_return_routing_context() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let org_units_req = test::TestRequest::get()
             .uri("/org/units?tenantId=default")
@@ -5500,7 +5551,7 @@ mod tests {
 
     #[actix_web::test]
     async fn business_rules_modify_routing_priority_and_execution_requirements() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let org_units_req = test::TestRequest::get()
             .uri("/org/units?tenantId=default")
@@ -5557,8 +5608,7 @@ mod tests {
                 "priority": 700
             }))
             .to_request();
-        let _: BusinessRule =
-            test::call_and_read_body_json(&app, create_execution_rule_req).await;
+        let _: BusinessRule = test::call_and_read_body_json(&app, create_execution_rule_req).await;
         let create_scoped_rule_req = test::TestRequest::post()
             .uri("/business-rules")
             .set_json(&serde_json::json!({
@@ -5604,18 +5654,13 @@ mod tests {
             .to_request();
         let scoped_rules: Vec<BusinessRule> =
             test::call_and_read_body_json(&app, scoped_rules_req).await;
-        assert!(
-            scoped_rules
-                .iter()
-                .any(|rule| rule.id == scoped_rule.id)
-        );
+        assert!(scoped_rules.iter().any(|rule| rule.id == scoped_rule.id));
     }
 
     #[actix_web::test]
     async fn vault_keys_are_tenant_scoped_and_not_exposed_in_plaintext() {
         let app_state = test_state();
-        let app =
-            test::init_service(App::new().app_data(app_state.clone()).configure(app_config)).await;
+        let app = test::init_service(build_app(app_state.clone())).await;
 
         let create_secret_req = test::TestRequest::post()
             .uri("/vault/keys")
@@ -5656,7 +5701,7 @@ mod tests {
 
     #[actix_web::test]
     async fn execute_action_uses_tenant_vault_credentials_and_tracks_execution() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let create_action_req = test::TestRequest::post()
             .uri("/actions")
@@ -5713,7 +5758,8 @@ mod tests {
                 }
             }))
             .to_request();
-        let execution: ExecutionResultRecord = test::call_and_read_body_json(&app, execute_req).await;
+        let execution: ExecutionResultRecord =
+            test::call_and_read_body_json(&app, execute_req).await;
         assert_eq!(execution.tenant_id, "acme");
         assert_eq!(execution.provider, "slack");
         assert_eq!(execution.status, "success");
@@ -5733,7 +5779,7 @@ mod tests {
 
     #[actix_web::test]
     async fn behavioral_patterns_endpoint_infers_operational_truth_layer() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5791,7 +5837,7 @@ mod tests {
 
     #[actix_web::test]
     async fn process_graph_endpoint_reconstructs_as_is_flow_and_drift() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5867,7 +5913,7 @@ mod tests {
 
     #[actix_web::test]
     async fn operational_artifacts_endpoint_generates_policy_ready_documents() {
-        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+        let app = test::init_service(build_app(test_state())).await;
 
         let ingest_req = test::TestRequest::post()
             .uri("/ingest")
@@ -5911,11 +5957,31 @@ mod tests {
         let artifacts: Vec<OperationalArtifact> =
             test::call_and_read_body_json(&app, artifacts_req).await;
 
-        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "process_map"));
-        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "SOP"));
-        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "policy"));
-        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "decision_tree"));
-        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "swimlane"));
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "process_map")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "SOP")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "policy")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "decision_tree")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_type == "swimlane")
+        );
         assert!(artifacts.iter().all(|artifact| artifact.version == 1));
         assert!(
             artifacts
@@ -5930,5 +5996,4 @@ mod tests {
             test::call_and_read_body_json(&app, policy_artifacts_req).await;
         assert_eq!(policy_artifacts.len(), 1);
     }
-
 }
