@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 
 const DEFAULT_SIMULATION_TENANTS = [
   {
@@ -33,6 +34,42 @@ const DEFAULT_SIMULATION_TENANTS = [
     created_at: 0,
   },
 ] as const;
+
+type CreateTenantPayload = {
+  name?: unknown;
+  slug?: unknown;
+  subdomain?: unknown;
+  vertical?: unknown;
+  industry?: unknown;
+};
+
+function asTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function simulationTenantFromPayload(payload: unknown) {
+  const candidate = (payload ?? {}) as CreateTenantPayload;
+  const name = asTrimmedString(candidate.name) ?? "New Tenant";
+  const rawSlug = asTrimmedString(candidate.slug) ?? asTrimmedString(candidate.subdomain) ?? name;
+  const slug = normalizeTenantSlug(rawSlug) || "default";
+  const vertical = asTrimmedString(candidate.vertical) ?? "Property Management";
+  const industry = asTrimmedString(candidate.industry) ?? "Commercial Real Estate";
+
+  return {
+    id: slug,
+    slug,
+    domain: tenantDomainFromSlug(slug),
+    name,
+    display_name: name,
+    vertical,
+    industry,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+}
 
 export async function GET() {
   try {
@@ -68,12 +105,17 @@ export async function POST(request: Request) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+
+    if (!response.ok && response.status >= 500) {
+      return NextResponse.json(simulationTenantFromPayload(payload), { status: 201 });
+    }
+
     const body = await response.text();
     return new NextResponse(body, {
       status: response.status,
       headers: { "Content-Type": "application/json" },
     });
   } catch {
-    return NextResponse.json({ error: "Tenant service unavailable" }, { status: 503 });
+    return NextResponse.json(simulationTenantFromPayload(payload), { status: 201 });
   }
 }
