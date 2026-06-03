@@ -32,6 +32,16 @@ export type WorkItem = {
   assigned_org_unit_id: string;
   current_owner_id?: string;
   routing_path: string[];
+  priority?: string;
+  escalation_target?: string;
+  suppress_action?: boolean;
+  require_approval?: boolean;
+  applied_rules?: Array<{
+    rule_id: string;
+    title: string;
+    scope: string;
+    effect_summary: string;
+  }>;
   recommended_actions?: IngressRecommendedAction[];
 };
 
@@ -68,6 +78,27 @@ type WorkRoutingPreview = {
   action_name?: string | null;
   assigned_org_unit?: OrgUnit | null;
   routing_path: OrgUnit[];
+  priority?: string;
+  escalation_target?: string;
+  suppress_action?: boolean;
+  require_approval?: boolean;
+  applied_rules?: Array<{
+    rule_id: string;
+    title: string;
+    scope: string;
+    effect_summary: string;
+  }>;
+};
+
+type BusinessRule = {
+  id: string;
+  tenant_id: string;
+  org_unit_id?: string;
+  title: string;
+  rule_text: string;
+  scope: string;
+  active: boolean;
+  priority: number;
 };
 
 type VaultKey = {
@@ -104,7 +135,7 @@ type InboxClientProps = {
   initialWorkItems: WorkItem[];
 };
 
-type Tab = "inbox" | "work" | "actions" | "organization" | "settings";
+type Tab = "inbox" | "work" | "actions" | "organization" | "rules" | "settings";
 
 type SetupPack = {
   vertical: string;
@@ -202,7 +233,18 @@ export function InboxClient({
     "maintenance_request",
   );
   const [routingPreviewActionName, setRoutingPreviewActionName] = useState("");
+  const [routingPreviewSignalContent, setRoutingPreviewSignalContent] = useState("");
   const [routingPreview, setRoutingPreview] = useState<WorkRoutingPreview | null>(null);
+  const [businessRules, setBusinessRules] = useState<BusinessRule[]>([]);
+  const [businessRuleTitle, setBusinessRuleTitle] = useState("");
+  const [businessRuleText, setBusinessRuleText] = useState("");
+  const [businessRuleScope, setBusinessRuleScope] = useState("priority");
+  const [businessRuleOrgUnitId, setBusinessRuleOrgUnitId] = useState("");
+  const [businessRulePriority, setBusinessRulePriority] = useState("100");
+  const [businessRuleActive, setBusinessRuleActive] = useState(true);
+  const [structuredKeywords, setStructuredKeywords] = useState("");
+  const [structuredPriority, setStructuredPriority] = useState("high");
+  const [structuredEscalationOrgUnitId, setStructuredEscalationOrgUnitId] = useState("");
   const [vaultKeys, setVaultKeys] = useState<VaultKey[]>([]);
   const [vaultProvider, setVaultProvider] = useState("slack");
   const [vaultKeyName, setVaultKeyName] = useState("slack_bot_token");
@@ -213,12 +255,13 @@ export function InboxClient({
 
   const refresh = useCallback(async () => {
     const tenantQuery = `tenantId=${encodeURIComponent(tenantId)}`;
-    const [items, work, tenantList, actionList, orgUnitList, keyList, executionList] = await Promise.all([
+    const [items, work, tenantList, actionList, orgUnitList, ruleList, keyList, executionList] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
       fetchJson<Tenant[]>("/api/tenants"),
       fetchJson<ActionDefinition[]>(`/api/actions?${tenantQuery}`),
       fetchJson<OrgUnit[]>(`/api/org/units?${tenantQuery}`),
+      fetchJson<BusinessRule[]>(`/api/business-rules?${tenantQuery}`),
       fetchJson<VaultKey[]>(`/api/vault/keys?${tenantQuery}`),
       fetchJson<ActionExecution[]>(`/api/executions?${tenantQuery}`),
     ]);
@@ -227,6 +270,7 @@ export function InboxClient({
     setTenants(tenantList);
     setActions(actionList);
     setOrgUnits(orgUnitList);
+    setBusinessRules(ruleList);
     setVaultKeys(keyList);
     const groupedExecutions = executionList.reduce<Record<string, ActionExecution[]>>((acc, execution) => {
       if (!acc[execution.work_item_id]) {
@@ -514,6 +558,77 @@ export function InboxClient({
     await refresh();
   }
 
+  async function onCreateBusinessRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    const response = await fetch("/api/business-rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        orgUnitId: businessRuleOrgUnitId || undefined,
+        title: businessRuleTitle,
+        ruleText: businessRuleText,
+        scope: businessRuleScope,
+        active: businessRuleActive,
+        priority: Number.parseInt(businessRulePriority, 10) || 100,
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setBusinessRuleTitle("");
+    setBusinessRuleText("");
+    setBusinessRulePriority("100");
+    setBusinessRuleOrgUnitId("");
+    await refresh();
+  }
+
+  async function onCreateStructuredRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const keywords = structuredKeywords
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const escalationTarget = orgUnitById(structuredEscalationOrgUnitId)?.name;
+    const clauses = [];
+    if (keywords.length > 0) {
+      clauses.push(`If ${keywords.map((keyword) => `\"${keyword}\"`).join(" OR ")}`);
+    } else {
+      clauses.push("If incoming signal is received");
+    }
+    clauses.push(`set priority = ${structuredPriority.toUpperCase()}`);
+    if (escalationTarget) {
+      clauses.push(`escalate to ${escalationTarget}`);
+    }
+    const ruleText = `${clauses.join(", THEN ")}`;
+
+    const response = await fetch("/api/business-rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        title: `Structured rule (${structuredPriority.toUpperCase()})`,
+        ruleText,
+        scope: escalationTarget ? "escalation" : "priority",
+        priority: 200,
+      }),
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setStructuredKeywords("");
+    setStructuredEscalationOrgUnitId("");
+    await refresh();
+  }
+
   async function loadRoutingPreview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -523,6 +638,9 @@ export function InboxClient({
     });
     if (routingPreviewActionName.trim()) {
       query.set("actionName", routingPreviewActionName.trim());
+    }
+    if (routingPreviewSignalContent.trim()) {
+      query.set("signalContent", routingPreviewSignalContent.trim());
     }
 
     try {
@@ -565,7 +683,7 @@ export function InboxClient({
       <header className="space-y-3">
         <h1 className="text-3xl font-semibold">Operations Inbox</h1>
         <div className="flex flex-wrap items-center gap-2">
-          {(["inbox", "work", "actions", "organization", "settings"] as Tab[]).map((name) => (
+          {(["inbox", "work", "actions", "organization", "rules", "settings"] as Tab[]).map((name) => (
             <button
               key={name}
               type="button"
@@ -698,12 +816,31 @@ export function InboxClient({
                 <p className="mt-1 text-xs text-zinc-500">
                   Classification: {work.classification_type}
                 </p>
+                <p className="text-xs text-zinc-500">Priority: {(work.priority ?? "medium").toUpperCase()}</p>
                 <p className="text-xs text-zinc-500">
                   Assigned Team: {orgUnitById(work.assigned_org_unit_id)?.name ?? "Unassigned"}
                 </p>
+                {work.escalation_target ? (
+                  <p className="text-xs text-zinc-500">Escalation: {work.escalation_target}</p>
+                ) : null}
+                {work.suppress_action ? (
+                  <p className="text-xs text-amber-700">Execution suppressed by business rule</p>
+                ) : null}
+                {work.require_approval ? (
+                  <p className="text-xs text-blue-700">Approval required before execution</p>
+                ) : null}
                 <p className="text-xs text-zinc-500">
                   Location in Org: {formatRoutingPath(work.routing_path) || "Not routed"}
                 </p>
+                {(work.applied_rules ?? []).length > 0 ? (
+                  <div className="mt-1 rounded border bg-zinc-50 p-2 text-xs text-zinc-600">
+                    {(work.applied_rules ?? []).map((rule) => (
+                      <p key={rule.rule_id}>
+                        {rule.title}: {rule.effect_summary}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="mt-3 rounded border bg-zinc-50 p-3">
                   <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
                     Suggested Actions
@@ -953,6 +1090,12 @@ export function InboxClient({
               className="rounded border px-3 py-2"
               placeholder="Action Name (optional)"
             />
+            <input
+              value={routingPreviewSignalContent}
+              onChange={(event) => setRoutingPreviewSignalContent(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Signal Content (optional)"
+            />
             <button type="submit" className="rounded bg-zinc-900 px-4 py-2 text-white md:col-span-2">
               Preview Routing
             </button>
@@ -961,13 +1104,142 @@ export function InboxClient({
             <div className="rounded border bg-zinc-50 p-3 text-sm">
               <p>Classification: {routingPreview.classification_type}</p>
               <p>Action: {routingPreview.action_name ?? "Auto-selected"}</p>
+              <p>Priority: {(routingPreview.priority ?? "medium").toUpperCase()}</p>
               <p>Assigned Team: {routingPreview.assigned_org_unit?.name ?? "No route found"}</p>
+              {routingPreview.escalation_target ? (
+                <p>Escalation Target: {routingPreview.escalation_target}</p>
+              ) : null}
+              {routingPreview.suppress_action ? <p>Execution: Suppressed by rule</p> : null}
+              {routingPreview.require_approval ? <p>Execution: Approval required</p> : null}
               <p>
                 Location in Org:{" "}
                 {routingPreview.routing_path.map((orgUnit) => orgUnit.name).join(" / ") || "N/A"}
               </p>
+              {(routingPreview.applied_rules ?? []).length > 0 ? (
+                <div className="mt-2 rounded border bg-white p-2 text-xs text-zinc-600">
+                  {(routingPreview.applied_rules ?? []).map((rule) => (
+                    <p key={rule.rule_id}>
+                      {rule.title}: {rule.effect_summary}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
+        </section>
+      ) : null}
+
+      {tab === "rules" ? (
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-lg font-semibold">Business Rules</h2>
+          <form onSubmit={onCreateBusinessRule} className="grid gap-2 md:grid-cols-3">
+            <input
+              value={businessRuleTitle}
+              onChange={(event) => setBusinessRuleTitle(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Rule Title"
+              required
+            />
+            <select
+              value={businessRuleScope}
+              onChange={(event) => setBusinessRuleScope(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="routing">routing</option>
+              <option value="priority">priority</option>
+              <option value="escalation">escalation</option>
+              <option value="execution">execution</option>
+              <option value="classification_override">classification_override</option>
+            </select>
+            <input
+              value={businessRulePriority}
+              onChange={(event) => setBusinessRulePriority(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Priority Number"
+            />
+            <select
+              value={businessRuleOrgUnitId}
+              onChange={(event) => setBusinessRuleOrgUnitId(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="">Tenant-wide rule</option>
+              {orgUnits.map((orgUnit) => (
+                <option key={orgUnit.id} value={orgUnit.id}>
+                  {orgUnit.name}
+                </option>
+              ))}
+            </select>
+            <label className="flex items-center gap-2 rounded border px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={businessRuleActive}
+                onChange={(event) => setBusinessRuleActive(event.target.checked)}
+              />
+              Active
+            </label>
+            <button type="submit" className="rounded bg-black px-4 py-2 text-white">
+              Save Plain-English Rule
+            </button>
+            <textarea
+              value={businessRuleText}
+              onChange={(event) => setBusinessRuleText(event.target.value)}
+              className="rounded border px-3 py-2 md:col-span-3"
+              rows={3}
+              placeholder='Example: If "no heat" then set priority = HIGH and escalate to Operations'
+              required
+            />
+          </form>
+
+          <form onSubmit={onCreateStructuredRule} className="grid gap-2 rounded border p-3 md:grid-cols-4">
+            <input
+              value={structuredKeywords}
+              onChange={(event) => setStructuredKeywords(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder='IF keywords (comma-separated, e.g. "no heat,no water")'
+            />
+            <select
+              value={structuredPriority}
+              onChange={(event) => setStructuredPriority(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="high">THEN priority HIGH</option>
+              <option value="medium">THEN priority MEDIUM</option>
+              <option value="low">THEN priority LOW</option>
+            </select>
+            <select
+              value={structuredEscalationOrgUnitId}
+              onChange={(event) => setStructuredEscalationOrgUnitId(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="">No escalation</option>
+              {orgUnits.map((orgUnit) => (
+                <option key={orgUnit.id} value={orgUnit.id}>
+                  Escalate to {orgUnit.name}
+                </option>
+              ))}
+            </select>
+            <button type="submit" className="rounded bg-zinc-900 px-4 py-2 text-white">
+              Save Structured Rule
+            </button>
+          </form>
+
+          <div className="space-y-2">
+            {businessRules.map((rule) => (
+              <div key={rule.id} className="rounded border p-3 text-sm">
+                <p className="font-medium">
+                  {rule.title} <span className="text-xs text-zinc-500">({rule.scope})</span>
+                </p>
+                <p className="text-zinc-700">{rule.rule_text}</p>
+                <p className="text-xs text-zinc-500">
+                  Scope: {rule.org_unit_id ? orgUnitById(rule.org_unit_id)?.name ?? "Org unit" : "Tenant-wide"} •
+                  Priority: {rule.priority} • {rule.active ? "Active" : "Inactive"}
+                </p>
+              </div>
+            ))}
+            {businessRules.length === 0 ? (
+              <p className="text-sm text-zinc-600">No business rules configured yet.</p>
+            ) : null}
+          </div>
         </section>
       ) : null}
 

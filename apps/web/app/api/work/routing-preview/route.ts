@@ -6,6 +6,7 @@ export async function GET(request: Request) {
   const tenantId = url.searchParams.get("tenantId");
   const classificationType = url.searchParams.get("classificationType");
   const actionName = url.searchParams.get("actionName");
+  const signalContent = url.searchParams.get("signalContent");
 
   const query = new URLSearchParams();
   if (tenantId) {
@@ -16,6 +17,9 @@ export async function GET(request: Request) {
   }
   if (actionName) {
     query.set("actionName", actionName);
+  }
+  if (signalContent) {
+    query.set("signalContent", signalContent);
   }
 
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
