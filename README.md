@@ -68,7 +68,8 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `signal_events`
 - `ingress_events`
 - `work_items`
-- `operational_context`
+- `operational_crosswalk`
+- `operational_meanings`
 - `action_selections`
 - `work_outcomes`
 - `execution_results`

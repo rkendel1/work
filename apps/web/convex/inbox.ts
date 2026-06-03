@@ -1,38 +1,28 @@
 import { mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
 
-const operationalContextValidator = v.object({
-  summary: v.string(),
-  businessMeaning: v.string(),
-  operationalImpact: v.string(),
-  downstreamEffects: v.array(v.string()),
-  riskLevel: v.string(),
-  urgency: v.string(),
-  relatedProcesses: v.array(v.string()),
-  lastComputedAt: v.number(),
+const operationalMeaningValidator = v.object({
+  systemConcept: v.string(),
+  inferredMeaning: v.string(),
+  state: v.string(),
+  confidence: v.number(),
+  evidence: v.array(v.string()),
+  crosswalkVersion: v.optional(v.string()),
+  updatedAt: v.number(),
 });
 
-function fallbackOperationalContext(args: {
+function fallbackOperationalMeaning(args: {
   classificationType: string;
   summary: string;
-  status: string;
 }) {
   return {
-    summary: args.summary,
-    businessMeaning: `Operational signal classified as ${args.classificationType.replaceAll("_", " ")}.`,
-    operationalImpact:
-      args.status === "open"
-        ? "Requires routing and action selection to avoid unresolved operational risk."
-        : "Operational state updated; continue monitoring until closure.",
-    downstreamEffects: [
-      "Potential SLA variance",
-      "Cross-team coordination load",
-      "Service quality impact",
-    ],
-    riskLevel: "medium",
-    urgency: args.status === "open" ? "soon" : "routine",
-    relatedProcesses: ["signal_triage", "work_routing", "resolution_tracking"],
-    lastComputedAt: Date.now(),
+    systemConcept: args.classificationType,
+    inferredMeaning: args.summary,
+    state: "inferred",
+    confidence: 0.5,
+    evidence: [`classification:${args.classificationType}`, `summary:${args.summary}`],
+    crosswalkVersion: undefined,
+    updatedAt: Date.now(),
   };
 }
 
@@ -190,25 +180,31 @@ export const createWorkItem = mutationGeneric({
         }),
       ),
     ),
-    operationalContext: v.optional(operationalContextValidator),
+    operationalMeaning: v.optional(operationalMeaningValidator),
   },
   handler: async (ctx, args) => {
-    const context = args.operationalContext ?? fallbackOperationalContext(args);
-    const contextRecord = {
+    const meaning = args.operationalMeaning ?? fallbackOperationalMeaning(args);
+    const meaningRecord = {
       tenantId: args.tenantId,
       entityType: "work_item",
       entityId: args.externalId,
-      ...context,
+      systemConcept: meaning.systemConcept,
+      inferredMeaning: meaning.inferredMeaning,
+      state: meaning.state,
+      confidence: meaning.confidence,
+      evidence: meaning.evidence,
+      crosswalkVersion: meaning.crosswalkVersion,
+      updatedAt: meaning.updatedAt,
     };
-    const existingContext = await ctx.db
-      .query("operational_context")
+    const existingMeaning = await ctx.db
+      .query("operational_meanings")
       .withIndex("by_tenant_entity", (query) =>
-        query.eq("tenantId", contextRecord.tenantId),
+        query.eq("tenantId", meaningRecord.tenantId),
       )
       .filter((query) =>
         query.and(
-          query.eq(query.field("entityType"), contextRecord.entityType),
-          query.eq(query.field("entityId"), contextRecord.entityId),
+          query.eq(query.field("entityType"), meaningRecord.entityType),
+          query.eq(query.field("entityId"), meaningRecord.entityId),
         ),
       )
       .first();
@@ -222,10 +218,10 @@ export const createWorkItem = mutationGeneric({
     ).find((item) => item.externalId === args.externalId);
 
     if (existing) {
-      if (existingContext) {
-        await ctx.db.patch(existingContext._id, contextRecord);
+      if (existingMeaning) {
+        await ctx.db.patch(existingMeaning._id, meaningRecord);
       } else {
-        await ctx.db.insert("operational_context", contextRecord);
+        await ctx.db.insert("operational_meanings", meaningRecord);
       }
       return existing._id;
     }
@@ -274,10 +270,10 @@ export const createWorkItem = mutationGeneric({
       recommendedActions: args.recommendedActions,
     });
 
-    if (existingContext) {
-      await ctx.db.patch(existingContext._id, contextRecord);
+    if (existingMeaning) {
+      await ctx.db.patch(existingMeaning._id, meaningRecord);
     } else {
-      await ctx.db.insert("operational_context", contextRecord);
+      await ctx.db.insert("operational_meanings", meaningRecord);
     }
 
     return workItemId;
@@ -306,24 +302,36 @@ export const recordActionSelection = mutationGeneric({
       throw new Error("work item not found");
     }
 
+    const tenantProfile = (
+      await ctx.db
+        .query("tenants")
+        .collect()
+    ).find((record) => record.id === args.tenantId);
     const existingActionMapping = await ctx.db
-      .query("action_mappings")
-      .withIndex("by_tenant_system_action", (query) =>
+      .query("operational_crosswalk")
+      .withIndex("by_tenant_system_concept", (query) =>
         query.eq("tenantId", args.tenantId),
       )
-      .filter((query) => query.eq(query.field("systemAction"), args.systemAction))
+      .filter((query) => query.eq(query.field("systemConcept"), args.systemAction))
       .first();
 
     if (existingActionMapping) {
       await ctx.db.patch(existingActionMapping._id, {
-        tenantAction: args.tenantAction,
+        tenantTerm: args.tenantAction,
+        source: "user_defined",
+        updatedAt: Date.now(),
       });
     } else {
-      await ctx.db.insert("action_mappings", {
+      await ctx.db.insert("operational_crosswalk", {
         tenantId: args.tenantId,
-        systemAction: args.systemAction,
-        tenantAction: args.tenantAction,
+        vertical: tenantProfile?.vertical ?? "unknown",
+        industry: tenantProfile?.industry ?? "unknown",
+        systemConcept: args.systemAction,
+        tenantTerm: args.tenantAction,
+        description: "Action mapping selected during work routing.",
+        source: "user_defined",
         confidence: 0.5,
+        updatedAt: Date.now(),
       });
     }
 
@@ -376,6 +384,11 @@ export const recordWorkOutcome = mutationGeneric({
     });
 
     if (args.feedback) {
+      const tenantProfile = (
+        await ctx.db
+          .query("tenants")
+          .collect()
+      ).find((record) => record.id === args.tenantId);
       const feedbackDelta =
         args.feedback === "correct"
           ? 0.05
@@ -386,47 +399,107 @@ export const recordWorkOutcome = mutationGeneric({
               : -0.02;
 
       const classificationMapping = await ctx.db
-        .query("term_mappings")
-        .withIndex("by_tenant_system_term_type", (query) =>
+        .query("operational_crosswalk")
+        .withIndex("by_tenant_system_concept", (query) =>
           query.eq("tenantId", args.tenantId),
         )
-        .filter((query) =>
-          query.and(
-            query.eq(query.field("systemTerm"), workItem.classificationType),
-            query.eq(query.field("type"), "classification"),
-          ),
-        )
+        .filter((query) => query.eq(query.field("systemConcept"), workItem.classificationType))
         .first();
 
       if (classificationMapping) {
         const existingConfidence = classificationMapping.confidence ?? 0.5;
         await ctx.db.patch(classificationMapping._id, {
+          source: "user_defined",
           confidence: Math.max(0, Math.min(1, existingConfidence + feedbackDelta)),
+          updatedAt: Date.now(),
+        });
+      } else {
+        await ctx.db.insert("operational_crosswalk", {
+          tenantId: args.tenantId,
+          vertical: tenantProfile?.vertical ?? "unknown",
+          industry: tenantProfile?.industry ?? "unknown",
+          systemConcept: workItem.classificationType,
+          tenantTerm: workItem.classificationType,
+          description: "Classification mapping inferred from work outcome feedback.",
+          source: "inferred",
+          confidence: Math.max(0, Math.min(1, 0.5 + feedbackDelta)),
+          updatedAt: Date.now(),
         });
       }
 
       if (args.selectedActionId) {
         const actionMapping = await ctx.db
-          .query("action_mappings")
-          .withIndex("by_tenant_system_action", (query) =>
+          .query("operational_crosswalk")
+          .withIndex("by_tenant_system_concept", (query) =>
             query.eq("tenantId", args.tenantId),
           )
-          .filter((query) => query.eq(query.field("systemAction"), args.selectedActionId))
+          .filter((query) => query.eq(query.field("systemConcept"), args.selectedActionId))
           .first();
 
         if (actionMapping) {
           const existingConfidence = actionMapping.confidence ?? 0.5;
           await ctx.db.patch(actionMapping._id, {
+            source: "user_defined",
             confidence: Math.max(0, Math.min(1, existingConfidence + feedbackDelta)),
+            updatedAt: Date.now(),
           });
         } else {
-          await ctx.db.insert("action_mappings", {
+          await ctx.db.insert("operational_crosswalk", {
             tenantId: args.tenantId,
-            systemAction: args.selectedActionId,
-            tenantAction: args.selectedActionId,
+            vertical: tenantProfile?.vertical ?? "unknown",
+            industry: tenantProfile?.industry ?? "unknown",
+            systemConcept: args.selectedActionId,
+            tenantTerm: args.selectedActionId,
+            description: "Action mapping inferred from work outcome feedback.",
+            source: "inferred",
             confidence: Math.max(0, Math.min(1, 0.5 + feedbackDelta)),
+            updatedAt: Date.now(),
           });
         }
+      }
+
+      const existingMeaning = await ctx.db
+        .query("operational_meanings")
+        .withIndex("by_tenant_entity", (query) => query.eq("tenantId", args.tenantId))
+        .filter((query) =>
+          query.and(
+            query.eq(query.field("entityType"), "work_item"),
+            query.eq(query.field("entityId"), args.workItemExternalId),
+          ),
+        )
+        .first();
+
+      const nextConfidence = Math.max(
+        0,
+        Math.min(1, (existingMeaning?.confidence ?? 0.5) + feedbackDelta),
+      );
+      const nextState = args.feedback === "wrong" ? "inferred" : "confirmed";
+      const nextEvidence = [
+        ...(existingMeaning?.evidence ?? []),
+        `feedback:${args.feedback}`,
+        ...(args.resolutionNotes ? [`notes:${args.resolutionNotes}`] : []),
+      ];
+
+      if (existingMeaning) {
+        await ctx.db.patch(existingMeaning._id, {
+          inferredMeaning: workItem.summary,
+          confidence: nextConfidence,
+          state: nextState,
+          evidence: nextEvidence,
+          updatedAt: Date.now(),
+        });
+      } else {
+        await ctx.db.insert("operational_meanings", {
+          tenantId: args.tenantId,
+          entityType: "work_item",
+          entityId: args.workItemExternalId,
+          systemConcept: workItem.classificationType,
+          inferredMeaning: workItem.summary,
+          confidence: nextConfidence,
+          state: nextState,
+          evidence: nextEvidence,
+          updatedAt: Date.now(),
+        });
       }
     }
 

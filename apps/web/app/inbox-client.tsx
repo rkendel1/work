@@ -43,18 +43,17 @@ export type WorkItem = {
     effect_summary: string;
   }>;
   recommended_actions?: IngressRecommendedAction[];
-  operational_context?: {
+  operational_meaning?: {
     tenant_id: string;
     entity_type: string;
     entity_id: string;
-    summary: string;
-    business_meaning: string;
-    operational_impact: string;
-    downstream_effects: string[];
-    risk_level: string;
-    urgency: string;
-    related_processes: string[];
-    last_computed_at: number;
+    system_concept: string;
+    inferred_meaning: string;
+    state: string;
+    confidence: number;
+    evidence: string[];
+    crosswalk_version?: string;
+    updated_at: number;
   };
 };
 
@@ -210,13 +209,10 @@ type ContextViewMode = "raw" | "operational";
 
 function contextFallback() {
   return {
-    summary: "Context: Unknown",
-    businessMeaning: "Unknown",
-    operationalImpact: "Cannot determine operational impact",
-    downstreamEffects: [],
-    riskLevel: "Cannot determine operational impact",
-    urgency: "Requires classification or mapping",
-    relatedProcesses: [],
+    inferredMeaning: "Unknown",
+    state: "inferred",
+    confidence: 0,
+    evidence: [],
   };
 }
 
@@ -806,19 +802,16 @@ export function InboxClient({
 
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
-  const operationalContextForWork = (work: WorkItem) => {
-    if (!work.operational_context) {
+  const operationalMeaningForWork = (work: WorkItem) => {
+    if (!work.operational_meaning) {
       return contextFallback();
     }
 
     return {
-      summary: work.operational_context.summary,
-      businessMeaning: work.operational_context.business_meaning,
-      operationalImpact: work.operational_context.operational_impact,
-      downstreamEffects: work.operational_context.downstream_effects,
-      riskLevel: work.operational_context.risk_level,
-      urgency: work.operational_context.urgency,
-      relatedProcesses: work.operational_context.related_processes,
+      inferredMeaning: work.operational_meaning.inferred_meaning,
+      state: work.operational_meaning.state,
+      confidence: work.operational_meaning.confidence,
+      evidence: work.operational_meaning.evidence,
     };
   };
   const artifactTypeByKnowledgeTab: Record<OperationalKnowledgeTab, OperationalArtifact["type"]> = {
@@ -961,7 +954,7 @@ export function InboxClient({
                     <>
                       <div className="rounded border p-3">
                         {(() => {
-                          const context = operationalContextForWork(selectedWork);
+                          const context = operationalMeaningForWork(selectedWork);
                           return (
                             <>
                         <p className="font-medium">{selectedWork.title}</p>
@@ -976,24 +969,20 @@ export function InboxClient({
                               {contextViewMode === "operational" ? (
                                 <div className="mt-2 space-y-1 text-xs text-zinc-700">
                                   <p>
-                                    <span className="font-medium">Business Meaning:</span>{" "}
-                                    {context.businessMeaning}
+                                    <span className="font-medium">Meaning:</span> {context.inferredMeaning}
                                   </p>
                                   <p>
-                                    <span className="font-medium">Operational Impact:</span>{" "}
-                                    {context.operationalImpact}
+                                    <span className="font-medium">Truth State:</span> {context.state}
                                   </p>
                                   <p>
-                                    <span className="font-medium">Risk Level:</span> {context.riskLevel}
+                                    <span className="font-medium">Confidence:</span>{" "}
+                                    {(context.confidence * 100).toFixed(0)}%
                                   </p>
                                   <p>
-                                    <span className="font-medium">Urgency:</span> {context.urgency}
-                                  </p>
-                                  <p>
-                                    <span className="font-medium">Downstream Effects:</span>{" "}
-                                    {context.downstreamEffects.length > 0
-                                      ? context.downstreamEffects.join(" • ")
-                                      : "Requires classification or mapping"}
+                                    <span className="font-medium">Evidence:</span>{" "}
+                                    {context.evidence.length > 0
+                                      ? context.evidence.join(" • ")
+                                      : "No evidence recorded"}
                                   </p>
                                 </div>
                               ) : null}
@@ -1028,7 +1017,7 @@ export function InboxClient({
             {workItems.map((work) => (
               <div key={work.id} className="rounded border p-3 text-sm">
                 {(() => {
-                  const context = operationalContextForWork(work);
+                  const context = operationalMeaningForWork(work);
                   return (
                     <>
                 <div className="flex items-center justify-between gap-2">
@@ -1057,24 +1046,21 @@ export function InboxClient({
                 </p>
                       {contextViewMode === "operational" ? (
                         <div className="mt-2 rounded border bg-zinc-50 p-2 text-xs text-zinc-700">
-                          <p>
-                            <span className="font-medium">Business Meaning:</span> {context.businessMeaning}
+                         <p>
+                            <span className="font-medium">Meaning:</span> {context.inferredMeaning}
                           </p>
                           <p>
-                            <span className="font-medium">Operational Impact:</span>{" "}
-                            {context.operationalImpact}
+                            <span className="font-medium">Truth State:</span> {context.state}
                           </p>
                           <p>
-                            <span className="font-medium">Downstream Effects:</span>{" "}
-                            {context.downstreamEffects.length > 0
-                              ? context.downstreamEffects.join(" • ")
-                              : "Requires classification or mapping"}
+                            <span className="font-medium">Evidence:</span>{" "}
+                            {context.evidence.length > 0
+                              ? context.evidence.join(" • ")
+                              : "No evidence recorded"}
                           </p>
                           <p>
-                            <span className="font-medium">Risk Level:</span> {context.riskLevel}
-                          </p>
-                          <p>
-                            <span className="font-medium">Urgency:</span> {context.urgency}
+                            <span className="font-medium">Confidence:</span>{" "}
+                            {(context.confidence * 100).toFixed(0)}%
                           </p>
                         </div>
                       ) : null}
