@@ -168,6 +168,20 @@ type ProcessGraph = {
   external_execution_points: string[];
 };
 
+type OperationalArtifact = {
+  tenant_id: string;
+  name: string;
+  type: "process_map" | "SOP" | "policy" | "swimlane" | "decision_tree" | string;
+  org_unit_id?: string;
+  source: string;
+  version: number;
+  content: unknown;
+  derived_from: string[];
+  last_updated_at: number;
+};
+
+type OperationalKnowledgeTab = "processes" | "sops" | "policies" | "exceptions" | "drift";
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { cache: "no-store" });
   if (!response.ok) {
@@ -305,6 +319,9 @@ export function InboxClient({
   const [executionsByWork, setExecutionsByWork] = useState<Record<string, ActionExecution[]>>({});
   const [behavioralPatterns, setBehavioralPatterns] = useState<BehavioralPattern[]>([]);
   const [processGraph, setProcessGraph] = useState<ProcessGraph | null>(null);
+  const [operationalArtifacts, setOperationalArtifacts] = useState<OperationalArtifact[]>([]);
+  const [knowledgeTab, setKnowledgeTab] = useState<OperationalKnowledgeTab>("processes");
+  const [artifactQuery, setArtifactQuery] = useState("");
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
@@ -321,6 +338,7 @@ export function InboxClient({
       executionList,
       patternList,
       graph,
+      artifactList,
     ] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
@@ -332,6 +350,7 @@ export function InboxClient({
       fetchJson<ActionExecution[]>(`/api/executions?${tenantQuery}`),
       fetchJson<BehavioralPattern[]>(`/api/behavioral-patterns?${tenantQuery}`),
       fetchJson<ProcessGraph>(`/api/process-graph?${tenantQuery}`),
+      fetchJson<OperationalArtifact[]>(`/api/operational-artifacts?${tenantQuery}`),
     ]);
     setInboxItems(items);
     setWorkItems(work);
@@ -342,6 +361,7 @@ export function InboxClient({
     setVaultKeys(keyList);
     setBehavioralPatterns(patternList);
     setProcessGraph(graph);
+    setOperationalArtifacts(artifactList);
     const groupedExecutions = executionList.reduce<Record<string, ActionExecution[]>>((acc, execution) => {
       if (!acc[execution.work_item_id]) {
         acc[execution.work_item_id] = [];
@@ -747,6 +767,25 @@ export function InboxClient({
 
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
+  const artifactTypeByKnowledgeTab: Record<OperationalKnowledgeTab, OperationalArtifact["type"]> = {
+    processes: "process_map",
+    sops: "SOP",
+    policies: "policy",
+    exceptions: "decision_tree",
+    drift: "swimlane",
+  };
+  const activeArtifactType = artifactTypeByKnowledgeTab[knowledgeTab];
+  const normalizedArtifactQuery = artifactQuery.trim().toLowerCase();
+  const filteredArtifacts = operationalArtifacts.filter((artifact) => {
+    if (artifact.type !== activeArtifactType) {
+      return false;
+    }
+    if (!normalizedArtifactQuery) {
+      return true;
+    }
+    const haystack = `${artifact.name} ${artifact.type} ${JSON.stringify(artifact.content)}`.toLowerCase();
+    return haystack.includes(normalizedArtifactQuery);
+  });
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-6">
@@ -1315,62 +1354,57 @@ export function InboxClient({
 
       {tab === "truth" ? (
         <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-lg font-semibold">How Work Actually Happens</h2>
+          <h2 className="text-lg font-semibold">How Your Organization Works</h2>
           <p className="text-sm text-zinc-600">
-            Operational Truth Layer (inferred from routing, execution, and outcome behavior).
+            Living operational artifacts generated from observed behavior.
           </p>
-          {processGraph ? (
-            <div className="rounded border p-3 text-sm">
-              <p className="font-medium">{processGraph.process_name}</p>
-              <p className="text-xs text-zinc-500">
-                Designed: {processGraph.designed_process.join(" → ")}
-              </p>
-              <p className="mt-1 text-xs text-zinc-500">
-                Drift Score: {processGraph.drift_score.toFixed(2)}
-              </p>
-              <div className="mt-3 space-y-1">
-                {processGraph.process_edges.map((edge) => {
-                  const from = processGraph.process_nodes.find((node) => node.id === edge.from_node_id);
-                  const to = processGraph.process_nodes.find((node) => node.id === edge.to_node_id);
-                  return (
-                    <p key={edge.id} className="text-xs text-zinc-700">
-                      {(from?.name ?? "Unknown")} → {(to?.name ?? "Unknown")} • {edge.transition_type} •{" "}
-                      {edge.frequency.toFixed(0)} occurrences
-                    </p>
-                  );
-                })}
-              </div>
-              {processGraph.bottlenecks.length > 0 ? (
-                <p className="mt-2 text-xs text-amber-700">
-                  Bottlenecks: {processGraph.bottlenecks.join(" • ")}
-                </p>
-              ) : null}
-              {processGraph.bypass_paths.length > 0 ? (
-                <p className="mt-1 text-xs text-zinc-600">
-                  Bypass Paths: {processGraph.bypass_paths.join(" • ")}
-                </p>
-              ) : null}
-              {processGraph.external_execution_points.length > 0 ? (
-                <p className="mt-1 text-xs text-zinc-600">
-                  External Execution: {processGraph.external_execution_points.join(" • ")}
-                </p>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {(["processes", "sops", "policies", "exceptions", "drift"] as OperationalKnowledgeTab[]).map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => setKnowledgeTab(name)}
+                className={`rounded border px-3 py-1 text-xs uppercase ${
+                  knowledgeTab === name ? "bg-zinc-900 text-white" : "bg-white"
+                }`}
+              >
+                {name}
+              </button>
+            ))}
+            <input
+              value={artifactQuery}
+              onChange={(event) => setArtifactQuery(event.target.value)}
+              className="ml-auto rounded border px-2 py-1 text-xs"
+              placeholder="Artifact query"
+            />
+          </div>
           <div className="space-y-2">
-            {behavioralPatterns.map((pattern) => (
-              <div key={pattern.id} className="rounded border p-3 text-sm">
-                <p className="font-medium">{pattern.description}</p>
-                <p className="text-xs uppercase text-zinc-500">{pattern.pattern_type}</p>
-                <p className="text-xs text-zinc-500">
-                  Confidence: {(pattern.confidence * 100).toFixed(0)}% • Impact:{" "}
-                  {pattern.impact_score.toFixed(0)}
+            {filteredArtifacts.map((artifact) => (
+              <div key={`${artifact.type}-${artifact.name}`} className="rounded border p-3 text-sm">
+                <p className="font-medium">{artifact.name}</p>
+                <p className="text-xs uppercase text-zinc-500">
+                  {artifact.type} • {artifact.source} • v{artifact.version}
                 </p>
+                <pre className="mt-2 overflow-x-auto rounded bg-zinc-50 p-2 text-xs text-zinc-700">
+                  {JSON.stringify(artifact.content, null, 2)}
+                </pre>
               </div>
             ))}
-            {behavioralPatterns.length === 0 ? (
-              <p className="text-sm text-zinc-600">No behavioral patterns detected yet.</p>
+            {filteredArtifacts.length === 0 ? (
+              <p className="text-sm text-zinc-600">No artifacts match this query yet.</p>
             ) : null}
+          </div>
+          {processGraph ? (
+            <p className="text-xs text-zinc-500">
+              Current drift score: {processGraph.drift_score.toFixed(2)}
+            </p>
+          ) : null}
+          <div className="space-y-1 text-xs text-zinc-500">
+            {behavioralPatterns.slice(0, 3).map((pattern) => (
+              <p key={pattern.id}>
+                {pattern.pattern_type}: {(pattern.confidence * 100).toFixed(0)}% confidence
+              </p>
+            ))}
           </div>
         </section>
       ) : null}

@@ -163,6 +163,20 @@ struct ProcessGraph {
     external_execution_points: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationalArtifact {
+    tenant_id: String,
+    name: String,
+    #[serde(rename = "type")]
+    artifact_type: String,
+    org_unit_id: Option<Uuid>,
+    source: String,
+    version: u64,
+    content: Value,
+    derived_from: Vec<String>,
+    last_updated_at: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IngestRequest {
@@ -198,6 +212,15 @@ struct ExtractRequest {
 #[serde(rename_all = "camelCase")]
 struct TenantScopedQuery {
     tenant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationalArtifactQuery {
+    tenant_id: Option<String>,
+    #[serde(rename = "type")]
+    artifact_type: Option<String>,
+    q: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -510,6 +533,7 @@ struct State {
     behavioral_patterns: Vec<BehavioralPattern>,
     process_nodes: Vec<ProcessNode>,
     process_edges: Vec<ProcessEdge>,
+    operational_artifacts: Vec<OperationalArtifact>,
     tenant_secrets: Vec<TenantSecret>,
 }
 
@@ -547,6 +571,7 @@ impl Default for State {
             behavioral_patterns: Vec::new(),
             process_nodes: Vec::new(),
             process_edges: Vec::new(),
+            operational_artifacts: Vec::new(),
             tenant_secrets: Vec::new(),
         }
     }
@@ -3692,6 +3717,203 @@ async fn get_process_graph(
     HttpResponse::Ok().json(graph)
 }
 
+fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<OperationalArtifact> {
+    let now = Utc::now().timestamp();
+    let process_graph = infer_process_graph(state, tenant_id);
+    let behavioral_patterns = infer_behavioral_patterns(state, tenant_id);
+    let top_bypass = process_graph.bypass_paths.first().cloned();
+
+    let mut policy_recommendations: Vec<String> = behavioral_patterns
+        .iter()
+        .filter_map(|pattern| match pattern.pattern_type.as_str() {
+            "bypass_behavior" if pattern.confidence >= 0.4 => Some(
+                "Approve external vendor escalation for urgent incidents with execution logging."
+                    .to_string(),
+            ),
+            "action_drift" if pattern.confidence >= 0.3 => Some(
+                "Formalize common operator overrides as approved routing options.".to_string(),
+            ),
+            "org_bottleneck" if pattern.confidence >= 0.5 => Some(
+                "Introduce triage escalation policy when unresolved queue concentration exceeds 50%."
+                    .to_string(),
+            ),
+            _ => None,
+        })
+        .collect();
+    if policy_recommendations.is_empty() {
+        policy_recommendations.push(
+            "Maintain current routing policy and continue monitoring for drift signals.".to_string(),
+        );
+    }
+
+    let sop_steps: Vec<String> = if process_graph.designed_process.is_empty() {
+        vec![
+            "Capture incoming operational signal".to_string(),
+            "Assign to responsible team".to_string(),
+            "Resolve and close with documented outcome".to_string(),
+        ]
+    } else {
+        process_graph
+            .designed_process
+            .iter()
+            .enumerate()
+            .map(|(index, step)| format!("{}. {}", index + 1, step))
+            .collect()
+    };
+
+    let artifacts = vec![
+        OperationalArtifact {
+            tenant_id: tenant_id.to_string(),
+            name: format!("{} Process Map (As-Is)", process_graph.process_name),
+            artifact_type: "process_map".to_string(),
+            org_unit_id: None,
+            source: "inferred".to_string(),
+            version: 1,
+            content: serde_json::json!({
+                "designedFlow": process_graph.designed_process,
+                "observedEdges": process_graph.process_edges,
+                "bypassPaths": process_graph.bypass_paths,
+                "driftScore": process_graph.drift_score,
+                "externalExecutionPoints": process_graph.external_execution_points,
+            }),
+            derived_from: vec![
+                "process_nodes".to_string(),
+                "process_edges".to_string(),
+                "action_selections".to_string(),
+                "action_executions".to_string(),
+            ],
+            last_updated_at: now,
+        },
+        OperationalArtifact {
+            tenant_id: tenant_id.to_string(),
+            name: format!("Standard Operating Procedure: {}", process_graph.process_name),
+            artifact_type: "SOP".to_string(),
+            org_unit_id: None,
+            source: "generated".to_string(),
+            version: 1,
+            content: serde_json::json!({
+                "title": process_graph.process_name,
+                "steps": sop_steps,
+                "notes": top_bypass.map(|path| format!("Observed deviation: {path}")),
+            }),
+            derived_from: vec![
+                "process_nodes".to_string(),
+                "process_edges".to_string(),
+                "work_outcomes".to_string(),
+            ],
+            last_updated_at: now,
+        },
+        OperationalArtifact {
+            tenant_id: tenant_id.to_string(),
+            name: "Policy Recommendations From Observed Behavior".to_string(),
+            artifact_type: "policy".to_string(),
+            org_unit_id: None,
+            source: "generated".to_string(),
+            version: 1,
+            content: serde_json::json!({
+                "recommendations": policy_recommendations,
+                "basedOnPatterns": behavioral_patterns,
+            }),
+            derived_from: vec![
+                "behavioral_patterns".to_string(),
+                "action_selections".to_string(),
+                "action_executions".to_string(),
+            ],
+            last_updated_at: now,
+        },
+        OperationalArtifact {
+            tenant_id: tenant_id.to_string(),
+            name: "Exception Decision Tree".to_string(),
+            artifact_type: "decision_tree".to_string(),
+            org_unit_id: None,
+            source: "generated".to_string(),
+            version: 1,
+            content: serde_json::json!({
+                "entry": "Maintenance Review",
+                "branches": [
+                    {
+                        "condition": "External provider needed",
+                        "nextStep": "Vendor Call",
+                    },
+                    {
+                        "condition": "Approval or escalation required",
+                        "nextStep": "Escalation",
+                    },
+                    {
+                        "condition": "Standard flow",
+                        "nextStep": "Completion",
+                    }
+                ],
+            }),
+            derived_from: vec![
+                "process_edges".to_string(),
+                "business_rules".to_string(),
+                "work_items".to_string(),
+            ],
+            last_updated_at: now,
+        },
+        OperationalArtifact {
+            tenant_id: tenant_id.to_string(),
+            name: "Operational Drift Swimlane".to_string(),
+            artifact_type: "swimlane".to_string(),
+            org_unit_id: None,
+            source: "generated".to_string(),
+            version: 1,
+            content: serde_json::json!({
+                "driftScore": process_graph.drift_score,
+                "bottlenecks": process_graph.bottlenecks,
+                "bypassPaths": process_graph.bypass_paths,
+                "externalExecutionPoints": process_graph.external_execution_points,
+            }),
+            derived_from: vec![
+                "behavioral_patterns".to_string(),
+                "process_edges".to_string(),
+                "work_items".to_string(),
+            ],
+            last_updated_at: now,
+        },
+    ];
+
+    state
+        .operational_artifacts
+        .retain(|artifact| artifact.tenant_id != tenant_id);
+    state.operational_artifacts.extend(artifacts.iter().cloned());
+    artifacts
+}
+
+async fn list_operational_artifacts(
+    data: web::Data<AppState>,
+    query: web::Query<OperationalArtifactQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    let artifacts = infer_operational_artifacts(&mut state, &tenant_id);
+    let type_filter = query.artifact_type.as_ref().map(|value| value.to_lowercase());
+    let search_filter = query.q.as_ref().map(|value| value.to_lowercase());
+    let filtered: Vec<OperationalArtifact> = artifacts
+        .into_iter()
+        .filter(|artifact| {
+            if let Some(filter) = type_filter.as_ref() {
+                if artifact.artifact_type.to_lowercase() != *filter {
+                    return false;
+                }
+            }
+            if let Some(filter) = search_filter.as_ref() {
+                let haystack = format!(
+                    "{} {} {}",
+                    artifact.name,
+                    artifact.artifact_type,
+                    artifact.content
+                )
+                .to_lowercase();
+                return haystack.contains(filter);
+            }
+            true
+        })
+        .collect();
+    HttpResponse::Ok().json(filtered)
+}
+
 async fn list_items(
     data: web::Data<AppState>,
     query: web::Query<TenantScopedQuery>,
@@ -4044,6 +4266,7 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
         .route("/behavioral-patterns", web::get().to(list_behavioral_patterns))
+        .route("/operational-artifacts", web::get().to(list_operational_artifacts))
         .route("/process-graph", web::get().to(get_process_graph))
         .route("/work/routing-preview", web::get().to(work_routing_preview))
         .route("/work/{id}/selection", web::post().to(select_work_action))
@@ -4869,6 +5092,72 @@ mod tests {
                 .any(|edge| edge.transition_type == "external")
         );
         assert!(graph.drift_score > 0.0);
+    }
+
+    #[actix_web::test]
+    async fn operational_artifacts_endpoint_generates_policy_ready_documents() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in Room A"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let select_action_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/selection", work_item.id))
+            .set_json(&serde_json::json!({
+                "systemAction": "Inspect HVAC Unit",
+                "tenantAction": "Dispatch Maintenance Vendor"
+            }))
+            .to_request();
+        let _: ActionSelection = test::call_and_read_body_json(&app, select_action_req).await;
+
+        let execute_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&serde_json::json!({
+                "workItemId": work_item.id,
+                "actionName": "Dispatch Maintenance Vendor",
+                "provider": "slack"
+            }))
+            .to_request();
+        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+
+        let artifacts_req = test::TestRequest::get()
+            .uri("/operational-artifacts?tenantId=default")
+            .to_request();
+        let artifacts: Vec<OperationalArtifact> =
+            test::call_and_read_body_json(&app, artifacts_req).await;
+
+        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "process_map"));
+        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "SOP"));
+        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "policy"));
+        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "decision_tree"));
+        assert!(artifacts.iter().any(|artifact| artifact.artifact_type == "swimlane"));
+        assert!(artifacts.iter().all(|artifact| artifact.version == 1));
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.derived_from.contains(&"process_edges".to_string()))
+        );
+
+        let policy_artifacts_req = test::TestRequest::get()
+            .uri("/operational-artifacts?tenantId=default&type=policy&q=vendor")
+            .to_request();
+        let policy_artifacts: Vec<OperationalArtifact> =
+            test::call_and_read_body_json(&app, policy_artifacts_req).await;
+        assert_eq!(policy_artifacts.len(), 1);
     }
 
 }
