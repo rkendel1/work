@@ -182,6 +182,18 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_provider", ["tenantId", "provider"]),
+  behavioral_patterns: defineTable({
+    tenantId: v.string(),
+    patternType: v.string(),
+    description: v.string(),
+    evidence: v.any(),
+    confidence: v.number(),
+    impactScore: v.number(),
+    firstObservedAt: v.number(),
+    lastObservedAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_pattern_type", ["tenantId", "patternType"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),

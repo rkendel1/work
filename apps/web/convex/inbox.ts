@@ -366,6 +366,42 @@ export const recordWorkOutcome = mutationGeneric({
   },
 });
 
+export const upsertBehavioralPattern = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    patternType: v.string(),
+    description: v.string(),
+    evidence: v.any(),
+    confidence: v.number(),
+    impactScore: v.number(),
+    firstObservedAt: v.number(),
+    lastObservedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("behavioral_patterns")
+      .withIndex("by_tenant_pattern_type", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("patternType"), args.patternType))
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        description: args.description,
+        evidence: args.evidence,
+        confidence: args.confidence,
+        impactScore: args.impactScore,
+        firstObservedAt: Math.min(existing.firstObservedAt, args.firstObservedAt),
+        lastObservedAt: Math.max(existing.lastObservedAt, args.lastObservedAt),
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("behavioral_patterns", args);
+  },
+});
+
 export const listInboxItems = queryGeneric({
   args: {
     tenantId: v.string(),
@@ -388,6 +424,18 @@ export const listWorkItems = queryGeneric({
       .query("work_items")
       .withIndex("by_tenant_external_id", (query) => query.eq("tenantId", args.tenantId))
       .order("desc")
+      .collect();
+  },
+});
+
+export const listBehavioralPatterns = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("behavioral_patterns")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
       .collect();
   },
 });

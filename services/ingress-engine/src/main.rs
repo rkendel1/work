@@ -11,7 +11,7 @@ use recommendation_engine::{
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -110,6 +110,19 @@ struct WorkOutcome {
     resolution_notes: Option<String>,
     feedback: Option<String>,
     completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BehavioralPattern {
+    id: Uuid,
+    tenant_id: String,
+    pattern_type: String,
+    description: String,
+    evidence: Value,
+    confidence: f64,
+    impact_score: f64,
+    first_observed_at: i64,
+    last_observed_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -456,6 +469,7 @@ struct State {
     action_selections: Vec<ActionSelection>,
     work_outcomes: Vec<WorkOutcome>,
     action_executions: Vec<ActionExecution>,
+    behavioral_patterns: Vec<BehavioralPattern>,
     tenant_secrets: Vec<TenantSecret>,
 }
 
@@ -490,6 +504,7 @@ impl Default for State {
             action_selections: Vec::new(),
             work_outcomes: Vec::new(),
             action_executions: Vec::new(),
+            behavioral_patterns: Vec::new(),
             tenant_secrets: Vec::new(),
         }
     }
@@ -2938,7 +2953,9 @@ async fn execute_action(
         execution.external_ref = result.external_ref;
         execution.message = result.message;
         execution.executed_at = Some(Utc::now());
-        return HttpResponse::Created().json(execution.clone());
+        let response = execution.clone();
+        refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
+        return HttpResponse::Created().json(response);
     }
 
     HttpResponse::NotFound().body("execution not found")
@@ -2981,6 +2998,342 @@ async fn get_execution(
         return HttpResponse::NotFound().body("execution not found");
     };
     HttpResponse::Ok().json(execution)
+}
+
+fn infer_behavioral_patterns(state: &State, tenant_id: &str) -> Vec<BehavioralPattern> {
+    let now = Utc::now().timestamp();
+    let mut patterns: Vec<BehavioralPattern> = Vec::new();
+    let tenant_work_items: Vec<&WorkItem> = state
+        .work_items
+        .iter()
+        .filter(|work_item| work_item.tenant_id == tenant_id)
+        .collect();
+    let work_by_id: HashMap<Uuid, &WorkItem> = tenant_work_items
+        .iter()
+        .map(|work_item| (work_item.id, *work_item))
+        .collect();
+    let org_unit_by_id: HashMap<Uuid, &OrgUnit> = state
+        .org_units
+        .iter()
+        .filter(|org_unit| org_unit.tenant_id == tenant_id)
+        .map(|org_unit| (org_unit.id, org_unit))
+        .collect();
+    let action_by_name: HashMap<String, &ActionDefinition> = state
+        .actions
+        .iter()
+        .filter(|action| action.tenant_id == tenant_id)
+        .map(|action| (action.name.to_lowercase(), action))
+        .collect();
+
+    let tenant_selections: Vec<&ActionSelection> = state
+        .action_selections
+        .iter()
+        .filter(|selection| selection.tenant_id == tenant_id)
+        .collect();
+    if !tenant_selections.is_empty() {
+        let mut latest_selection_by_work_item: HashMap<Uuid, &ActionSelection> = HashMap::new();
+        for selection in tenant_selections.iter().copied() {
+            let entry = latest_selection_by_work_item
+                .entry(selection.work_item_id)
+                .or_insert(selection);
+            if selection.selected_at > entry.selected_at {
+                *entry = selection;
+            }
+        }
+
+        let mut routing_mismatch_by_path: HashMap<(String, String), usize> = HashMap::new();
+        let mut routing_mismatch_count: usize = 0;
+        let mut routing_first_observed_at = i64::MAX;
+        let mut routing_last_observed_at = 0;
+
+        for (work_item_id, selection) in latest_selection_by_work_item {
+            let Some(work_item) = work_by_id.get(&work_item_id) else {
+                continue;
+            };
+            let Some(action) = action_by_name.get(&selection.tenant_action.to_lowercase()) else {
+                continue;
+            };
+            if action.assigned_org_unit_id == work_item.assigned_org_unit_id {
+                continue;
+            }
+
+            routing_mismatch_count += 1;
+            let from_org_unit = org_unit_by_id
+                .get(&work_item.assigned_org_unit_id)
+                .map(|org_unit| org_unit.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let to_org_unit = org_unit_by_id
+                .get(&action.assigned_org_unit_id)
+                .map(|org_unit| org_unit.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            *routing_mismatch_by_path
+                .entry((from_org_unit, to_org_unit))
+                .or_insert(0) += 1;
+
+            let selected_at = selection.selected_at.timestamp();
+            routing_first_observed_at = routing_first_observed_at.min(selected_at);
+            routing_last_observed_at = routing_last_observed_at.max(selected_at);
+        }
+
+        if routing_mismatch_count > 0 {
+            let total = tenant_selections.len() as f64;
+            let ratio = routing_mismatch_count as f64 / total;
+            let ((from_org_unit, to_org_unit), path_count) = routing_mismatch_by_path
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .unwrap_or((("Unknown".to_string(), "Unknown".to_string()), 0));
+
+            patterns.push(BehavioralPattern {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                pattern_type: "routing_bias".to_string(),
+                description: format!(
+                    "Routing frequently shifts from {from_org_unit} to {to_org_unit} before resolution"
+                ),
+                evidence: serde_json::json!({
+                    "reassignmentCount": routing_mismatch_count,
+                    "observedSelections": tenant_selections.len(),
+                    "dominantPath": {
+                        "from": from_org_unit,
+                        "to": to_org_unit,
+                        "count": path_count,
+                    },
+                }),
+                confidence: ratio,
+                impact_score: (ratio * 100.0).round(),
+                first_observed_at: if routing_first_observed_at == i64::MAX {
+                    now
+                } else {
+                    routing_first_observed_at
+                },
+                last_observed_at: if routing_last_observed_at == 0 {
+                    now
+                } else {
+                    routing_last_observed_at
+                },
+            });
+        }
+
+        let drifted_selections: Vec<&ActionSelection> = tenant_selections
+            .iter()
+            .copied()
+            .filter(|selection| {
+                !selection
+                    .system_action
+                    .eq_ignore_ascii_case(selection.tenant_action.as_str())
+            })
+            .collect();
+        if !drifted_selections.is_empty() {
+            let mut overrides: HashMap<(String, String), usize> = HashMap::new();
+            let mut first_observed_at = i64::MAX;
+            let mut last_observed_at = 0;
+            for selection in drifted_selections.iter().copied() {
+                *overrides
+                    .entry((
+                        selection.system_action.clone(),
+                        selection.tenant_action.clone(),
+                    ))
+                    .or_insert(0) += 1;
+                let selected_at = selection.selected_at.timestamp();
+                first_observed_at = first_observed_at.min(selected_at);
+                last_observed_at = last_observed_at.max(selected_at);
+            }
+            let ((system_action, tenant_action), override_count) = overrides
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .unwrap_or((("unknown".to_string(), "unknown".to_string()), 0));
+            let ratio = drifted_selections.len() as f64 / tenant_selections.len() as f64;
+
+            patterns.push(BehavioralPattern {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                pattern_type: "action_drift".to_string(),
+                description: format!(
+                    "System action '{system_action}' is frequently overridden to '{tenant_action}'"
+                ),
+                evidence: serde_json::json!({
+                    "driftCount": drifted_selections.len(),
+                    "observedSelections": tenant_selections.len(),
+                    "topOverride": {
+                        "systemAction": system_action,
+                        "tenantAction": tenant_action,
+                        "count": override_count,
+                    },
+                }),
+                confidence: ratio,
+                impact_score: (ratio * 100.0).round(),
+                first_observed_at: if first_observed_at == i64::MAX {
+                    now
+                } else {
+                    first_observed_at
+                },
+                last_observed_at: if last_observed_at == 0 {
+                    now
+                } else {
+                    last_observed_at
+                },
+            });
+        }
+    }
+
+    let tenant_executions: Vec<&ActionExecution> = state
+        .action_executions
+        .iter()
+        .filter(|execution| execution.tenant_id == tenant_id)
+        .filter(|execution| execution.executed_at.is_some())
+        .collect();
+    if !tenant_executions.is_empty() {
+        let external_executions: Vec<&ActionExecution> = tenant_executions
+            .iter()
+            .copied()
+            .filter(|execution| !execution.provider.eq_ignore_ascii_case("internal"))
+            .collect();
+        if !external_executions.is_empty() {
+            let mut provider_counts: HashMap<String, usize> = HashMap::new();
+            let mut first_observed_at = i64::MAX;
+            let mut last_observed_at = 0;
+            for execution in external_executions.iter().copied() {
+                *provider_counts
+                    .entry(execution.provider.clone())
+                    .or_insert(0) += 1;
+                if let Some(executed_at) = execution.executed_at {
+                    first_observed_at = first_observed_at.min(executed_at.timestamp());
+                    last_observed_at = last_observed_at.max(executed_at.timestamp());
+                }
+            }
+            let (provider, count) = provider_counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .unwrap_or(("unknown".to_string(), 0));
+            let ratio = external_executions.len() as f64 / tenant_executions.len() as f64;
+
+            patterns.push(BehavioralPattern {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                pattern_type: "bypass_behavior".to_string(),
+                description: format!(
+                    "Execution is frequently handled through external provider '{provider}' instead of internal actions"
+                ),
+                evidence: serde_json::json!({
+                    "externalExecutionCount": external_executions.len(),
+                    "observedExecutions": tenant_executions.len(),
+                    "dominantProvider": provider,
+                    "dominantProviderCount": count,
+                }),
+                confidence: ratio,
+                impact_score: (ratio * 100.0).round(),
+                first_observed_at: if first_observed_at == i64::MAX {
+                    now
+                } else {
+                    first_observed_at
+                },
+                last_observed_at: if last_observed_at == 0 {
+                    now
+                } else {
+                    last_observed_at
+                },
+            });
+        }
+    }
+
+    let unresolved_work_items: Vec<&WorkItem> = tenant_work_items
+        .iter()
+        .copied()
+        .filter(|work_item| {
+            !matches!(
+                work_item.status.as_str(),
+                "completed" | "failed" | "duplicate" | "irrelevant"
+            )
+        })
+        .collect();
+    if unresolved_work_items.len() >= 2 {
+        let mut unresolved_by_org_unit: HashMap<Uuid, usize> = HashMap::new();
+        for work_item in unresolved_work_items.iter().copied() {
+            *unresolved_by_org_unit
+                .entry(work_item.assigned_org_unit_id)
+                .or_insert(0) += 1;
+        }
+
+        let (org_unit_id, count) = unresolved_by_org_unit
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .unwrap_or((Uuid::nil(), 0));
+        let ratio = count as f64 / unresolved_work_items.len() as f64;
+        if ratio >= 0.5 {
+            let unresolved_ingress_ids: HashSet<Uuid> =
+                unresolved_work_items.iter().map(|work_item| work_item.inbox_item_id).collect();
+            let first_observed_at = state
+                .ingress_events
+                .iter()
+                .filter(|event| {
+                    event.tenant_id == tenant_id
+                        && unresolved_ingress_ids.contains(&event.ingress_id)
+                        && event.event_type == "work_generated"
+                })
+                .map(|event| event.created_at.timestamp())
+                .min()
+                .unwrap_or(now);
+            let last_observed_at = state
+                .ingress_events
+                .iter()
+                .filter(|event| {
+                    event.tenant_id == tenant_id
+                        && unresolved_ingress_ids.contains(&event.ingress_id)
+                        && event.event_type == "work_generated"
+                })
+                .map(|event| event.created_at.timestamp())
+                .max()
+                .unwrap_or(now);
+            let org_unit_name = org_unit_by_id
+                .get(&org_unit_id)
+                .map(|org_unit| org_unit.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            patterns.push(BehavioralPattern {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                pattern_type: "org_bottleneck".to_string(),
+                description: format!(
+                    "{org_unit_name} currently carries most unresolved work items"
+                ),
+                evidence: serde_json::json!({
+                    "unresolvedCount": count,
+                    "totalUnresolved": unresolved_work_items.len(),
+                    "orgUnit": org_unit_name,
+                }),
+                confidence: ratio,
+                impact_score: (ratio * 100.0).round(),
+                first_observed_at,
+                last_observed_at,
+            });
+        }
+    }
+
+    patterns
+}
+
+fn refresh_behavioral_patterns_for_tenant(state: &mut State, tenant_id: &str) {
+    state
+        .behavioral_patterns
+        .retain(|pattern| pattern.tenant_id != tenant_id);
+    let inferred = infer_behavioral_patterns(state, tenant_id);
+    state.behavioral_patterns.extend(inferred);
+}
+
+async fn list_behavioral_patterns(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
+    let patterns: Vec<BehavioralPattern> = state
+        .behavioral_patterns
+        .iter()
+        .filter(|pattern| pattern.tenant_id == tenant_id)
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(patterns)
 }
 
 async fn list_items(
@@ -3178,6 +3531,7 @@ async fn select_work_action(
             "action_selected".to_string(),
             format!("Selected action: {tenant_action}"),
         );
+        refresh_behavioral_patterns_for_tenant(&mut state, &selection.tenant_id);
         (selection, ingress_event, ingress_id)
     };
 
@@ -3268,6 +3622,7 @@ async fn record_work_outcome(
             "closed",
             format!("Outcome recorded: {}", outcome.status),
         );
+        refresh_behavioral_patterns_for_tenant(&mut state, &outcome.tenant_id);
         (outcome, close_event, ingress_id)
     };
 
@@ -3332,6 +3687,7 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/items", web::get().to(list_items))
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
+        .route("/behavioral-patterns", web::get().to(list_behavioral_patterns))
         .route("/work/routing-preview", web::get().to(work_routing_preview))
         .route("/work/{id}/selection", web::post().to(select_work_action))
         .route("/work/{id}/outcome", web::post().to(record_work_outcome))
@@ -4023,4 +4379,63 @@ mod tests {
             test::call_and_read_body_json(&app, execution_lookup_req).await;
         assert_eq!(fetched.id, execution.id);
     }
+
+    #[actix_web::test]
+    async fn behavioral_patterns_endpoint_infers_operational_truth_layer() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in Room A"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let select_action_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/selection", work_item.id))
+            .set_json(&serde_json::json!({
+                "systemAction": "Inspect HVAC Unit",
+                "tenantAction": "Dispatch Maintenance Vendor"
+            }))
+            .to_request();
+        let _: ActionSelection = test::call_and_read_body_json(&app, select_action_req).await;
+
+        let execute_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&serde_json::json!({
+                "workItemId": work_item.id,
+                "actionName": "Dispatch Maintenance Vendor",
+                "provider": "slack"
+            }))
+            .to_request();
+        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+
+        let patterns_req = test::TestRequest::get()
+            .uri("/behavioral-patterns?tenantId=default")
+            .to_request();
+        let patterns: Vec<BehavioralPattern> =
+            test::call_and_read_body_json(&app, patterns_req).await;
+
+        assert!(
+            patterns
+                .iter()
+                .any(|pattern| pattern.pattern_type == "action_drift")
+        );
+        assert!(
+            patterns
+                .iter()
+                .any(|pattern| pattern.pattern_type == "bypass_behavior")
+        );
+    }
+
 }

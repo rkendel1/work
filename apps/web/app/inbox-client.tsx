@@ -122,6 +122,18 @@ type ActionExecution = {
   executed_at?: string;
 };
 
+type BehavioralPattern = {
+  id: string;
+  tenant_id: string;
+  pattern_type: string;
+  description: string;
+  evidence: unknown;
+  confidence: number;
+  impact_score: number;
+  first_observed_at: number;
+  last_observed_at: number;
+};
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { cache: "no-store" });
   if (!response.ok) {
@@ -135,7 +147,14 @@ type InboxClientProps = {
   initialWorkItems: WorkItem[];
 };
 
-type Tab = "inbox" | "work" | "actions" | "organization" | "rules" | "settings";
+type Tab =
+  | "inbox"
+  | "work"
+  | "actions"
+  | "organization"
+  | "rules"
+  | "truth"
+  | "settings";
 
 type SetupPack = {
   vertical: string;
@@ -250,12 +269,23 @@ export function InboxClient({
   const [vaultKeyName, setVaultKeyName] = useState("slack_bot_token");
   const [vaultSecretValue, setVaultSecretValue] = useState("");
   const [executionsByWork, setExecutionsByWork] = useState<Record<string, ActionExecution[]>>({});
+  const [behavioralPatterns, setBehavioralPatterns] = useState<BehavioralPattern[]>([]);
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
   const refresh = useCallback(async () => {
     const tenantQuery = `tenantId=${encodeURIComponent(tenantId)}`;
-    const [items, work, tenantList, actionList, orgUnitList, ruleList, keyList, executionList] = await Promise.all([
+    const [
+      items,
+      work,
+      tenantList,
+      actionList,
+      orgUnitList,
+      ruleList,
+      keyList,
+      executionList,
+      patternList,
+    ] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
       fetchJson<Tenant[]>("/api/tenants"),
@@ -264,6 +294,7 @@ export function InboxClient({
       fetchJson<BusinessRule[]>(`/api/business-rules?${tenantQuery}`),
       fetchJson<VaultKey[]>(`/api/vault/keys?${tenantQuery}`),
       fetchJson<ActionExecution[]>(`/api/executions?${tenantQuery}`),
+      fetchJson<BehavioralPattern[]>(`/api/behavioral-patterns?${tenantQuery}`),
     ]);
     setInboxItems(items);
     setWorkItems(work);
@@ -272,6 +303,7 @@ export function InboxClient({
     setOrgUnits(orgUnitList);
     setBusinessRules(ruleList);
     setVaultKeys(keyList);
+    setBehavioralPatterns(patternList);
     const groupedExecutions = executionList.reduce<Record<string, ActionExecution[]>>((acc, execution) => {
       if (!acc[execution.work_item_id]) {
         acc[execution.work_item_id] = [];
@@ -683,7 +715,7 @@ export function InboxClient({
       <header className="space-y-3">
         <h1 className="text-3xl font-semibold">Operations Inbox</h1>
         <div className="flex flex-wrap items-center gap-2">
-          {(["inbox", "work", "actions", "organization", "rules", "settings"] as Tab[]).map((name) => (
+          {(["inbox", "work", "actions", "organization", "rules", "truth", "settings"] as Tab[]).map((name) => (
             <button
               key={name}
               type="button"
@@ -1238,6 +1270,30 @@ export function InboxClient({
             ))}
             {businessRules.length === 0 ? (
               <p className="text-sm text-zinc-600">No business rules configured yet.</p>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {tab === "truth" ? (
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-lg font-semibold">System Understanding of Your Organization</h2>
+          <p className="text-sm text-zinc-600">
+            Operational Truth Layer (inferred from routing, execution, and outcome behavior).
+          </p>
+          <div className="space-y-2">
+            {behavioralPatterns.map((pattern) => (
+              <div key={pattern.id} className="rounded border p-3 text-sm">
+                <p className="font-medium">{pattern.description}</p>
+                <p className="text-xs uppercase text-zinc-500">{pattern.pattern_type}</p>
+                <p className="text-xs text-zinc-500">
+                  Confidence: {(pattern.confidence * 100).toFixed(0)}% • Impact:{" "}
+                  {pattern.impact_score.toFixed(0)}
+                </p>
+              </div>
+            ))}
+            {behavioralPatterns.length === 0 ? (
+              <p className="text-sm text-zinc-600">No behavioral patterns detected yet.</p>
             ) : null}
           </div>
         </section>
