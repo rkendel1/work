@@ -177,6 +177,7 @@ For Next.js (`apps/web/.env.local`):
 - `NEXT_PUBLIC_APP_URL`
 - `NEXT_PUBLIC_CONVEX_URL`
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `NEXT_PUBLIC_ENABLE_AUTH_BYPASS` (optional: set to `true` to temporarily bypass Clerk and access the app for testing)
 - `CLERK_SECRET_KEY`
 - `POSTMARK_WEBHOOK_SECRET` (optional)
 - `RUST_INGRESS_URL`
