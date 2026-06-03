@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { resolveTenantId } from "@/lib/tenant-context";
 
 type IngestPayload = {
   source?: string;
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
 
   const source = payload.source?.trim();
   const content = payload.content?.trim();
-  const tenantId = payload.tenantId?.trim();
+  const tenantId = payload.tenantId?.trim() || resolveTenantId(request);
 
   if (!source || !content) {
     return NextResponse.json(

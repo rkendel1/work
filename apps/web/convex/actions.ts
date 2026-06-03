@@ -213,10 +213,13 @@ function loadOperationalPack(vertical: string, industry: string): OperationalPac
 export const createTenant = mutationGeneric({
   args: {
     id: v.string(),
+    name: v.string(),
     slug: v.string(),
+    domain: v.string(),
     displayName: v.string(),
-    vertical: v.string(),
-    industry: v.string(),
+    vertical: v.optional(v.string()),
+    industry: v.optional(v.string()),
+    createdAt: v.number(),
   },
   handler: async (ctx, args) => {
     const upsertCrosswalk = async (entry: {
@@ -251,7 +254,10 @@ export const createTenant = mutationGeneric({
     }
 
     const tenantRecordId = await ctx.db.insert("tenants", args);
-    const pack = loadOperationalPack(args.vertical, args.industry);
+    const pack = loadOperationalPack(
+      args.vertical ?? "General",
+      args.industry ?? "General",
+    );
     const orgUnitIdsByName = new Map<string, string>();
     for (const template of orgUnitTemplatesForPack(pack)) {
       const existing = await ctx.db

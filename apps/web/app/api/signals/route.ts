@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { resolveTenantId } from "@/lib/tenant-context";
 
 type SignalPayload = {
   sourceType?: string;
@@ -23,7 +24,7 @@ export async function POST(request: Request) {
   }
 
   const sourceType = payload.sourceType?.trim() || "api";
-  const tenantId = payload.tenantId?.trim();
+  const tenantId = payload.tenantId?.trim() || resolveTenantId(request);
   const normalizedContent = payload.normalizedContent?.trim();
 
   if (!normalizedContent && !payload.rawPayload) {
