@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 import { resolveTenantId } from "@/lib/tenant-context";
+import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type IngestPayload = {
   source?: string;
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
 
   const source = payload.source?.trim();
   const content = payload.content?.trim();
-  const tenantId = payload.tenantId?.trim() || resolveTenantId(request);
+  const tenantId = payload.tenantId?.trim() || resolveTenantId(request) || "default";
 
   if (!source || !content) {
     return NextResponse.json(
@@ -28,42 +28,22 @@ export async function POST(request: Request) {
     );
   }
 
-  const ingestResponse = await fetch(`${RUST_INGRESS_URL}/signals`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  try {
+    const result = await ingestSignalWithWasm({
+      tenantId,
       sourceType: source,
       rawPayload: { source, content },
       normalizedContent: content,
-      tenantId,
-    }),
-  });
-
-  if (!ingestResponse.ok) {
-    const body = await ingestResponse.text();
+      metadata: {
+        timestamp: Date.now(),
+        channel: "api",
+      },
+    });
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
     return NextResponse.json(
-      { error: "Ingress ingest failed", upstreamBody: body },
-      { status: ingestResponse.status },
+      { error: "WASM ingest failed", detail: error instanceof Error ? error.message : "unknown" },
+      { status: 500 },
     );
   }
-
-  const inboxItem = (await ingestResponse.json()) as { id: string };
-
-  const extractResponse = await fetch(`${RUST_INGRESS_URL}/extract`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ inbox_item_id: inboxItem.id }),
-  });
-
-  if (!extractResponse.ok) {
-    const body = await extractResponse.text();
-    return NextResponse.json(
-      { error: "Ingress extraction failed", inboxItem, upstreamBody: body },
-      { status: extractResponse.status },
-    );
-  }
-
-  const workItem = await extractResponse.json();
-
-  return NextResponse.json({ inboxItem, workItem }, { status: 201 });
 }

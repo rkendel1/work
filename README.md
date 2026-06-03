@@ -123,6 +123,13 @@ cd /tmp/workspace/rkendel1/work/apps/web
 npm run lint
 ```
 
+WASM build artifact (for Vercel-native ingress execution):
+
+```bash
+cd /tmp/workspace/rkendel1/work/apps/web
+npm run build:wasm
+```
+
 ## Environment Variables
 
 For Next.js (`apps/web/.env.local`):
