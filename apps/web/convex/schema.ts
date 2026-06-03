@@ -58,6 +58,21 @@ export default defineSchema({
     .index("by_inbox_external_id", ["inboxExternalId"])
     .index("by_tenant_external_id", ["tenantId", "externalId"])
     .index("by_tenant_inbox_external_id", ["tenantId", "inboxExternalId"]),
+  operational_context: defineTable({
+    tenantId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    summary: v.string(),
+    businessMeaning: v.string(),
+    operationalImpact: v.string(),
+    downstreamEffects: v.array(v.string()),
+    riskLevel: v.string(),
+    urgency: v.string(),
+    relatedProcesses: v.array(v.string()),
+    lastComputedAt: v.number(),
+  })
+    .index("by_tenant_entity", ["tenantId", "entityType", "entityId"])
+    .index("by_tenant_entity_type", ["tenantId", "entityType"]),
   users: defineTable({
     tenantId: v.optional(v.string()),
     handle: v.optional(v.string()),

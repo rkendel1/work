@@ -43,6 +43,19 @@ export type WorkItem = {
     effect_summary: string;
   }>;
   recommended_actions?: IngressRecommendedAction[];
+  operational_context?: {
+    tenant_id: string;
+    entity_type: string;
+    entity_id: string;
+    summary: string;
+    business_meaning: string;
+    operational_impact: string;
+    downstream_effects: string[];
+    risk_level: string;
+    urgency: string;
+    related_processes: string[];
+    last_computed_at: number;
+  };
 };
 
 type Tenant = {
@@ -181,6 +194,19 @@ type OperationalArtifact = {
 };
 
 type OperationalKnowledgeTab = "processes" | "sops" | "policies" | "exceptions" | "drift";
+type ContextViewMode = "raw" | "operational";
+
+function contextFallback() {
+  return {
+    summary: "Context: Unknown",
+    businessMeaning: "Unknown",
+    operationalImpact: "Cannot determine operational impact",
+    downstreamEffects: [],
+    riskLevel: "Cannot determine operational impact",
+    urgency: "Requires classification or mapping",
+    relatedProcesses: [],
+  };
+}
 
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { cache: "no-store" });
@@ -254,6 +280,7 @@ export function InboxClient({
   initialWorkItems,
 }: InboxClientProps) {
   const [tab, setTab] = useState<Tab>("inbox");
+  const [contextViewMode, setContextViewMode] = useState<ContextViewMode>("operational");
   const [tenantId, setTenantId] = useState("default");
   const [source, setSource] = useState("manual");
   const [content, setContent] = useState("");
@@ -767,6 +794,21 @@ export function InboxClient({
 
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
+  const operationalContextForWork = (work: WorkItem) => {
+    if (!work.operational_context) {
+      return contextFallback();
+    }
+
+    return {
+      summary: work.operational_context.summary,
+      businessMeaning: work.operational_context.business_meaning,
+      operationalImpact: work.operational_context.operational_impact,
+      downstreamEffects: work.operational_context.downstream_effects,
+      riskLevel: work.operational_context.risk_level,
+      urgency: work.operational_context.urgency,
+      relatedProcesses: work.operational_context.related_processes,
+    };
+  };
   const artifactTypeByKnowledgeTab: Record<OperationalKnowledgeTab, OperationalArtifact["type"]> = {
     processes: "process_map",
     sops: "SOP",
@@ -804,10 +846,30 @@ export function InboxClient({
               {name}
             </button>
           ))}
+          <div className="ml-auto flex items-center gap-1 rounded border p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setContextViewMode("raw")}
+              className={`rounded px-2 py-1 ${
+                contextViewMode === "raw" ? "bg-zinc-900 text-white" : "bg-white text-zinc-700"
+              }`}
+            >
+              Raw View
+            </button>
+            <button
+              type="button"
+              onClick={() => setContextViewMode("operational")}
+              className={`rounded px-2 py-1 ${
+                contextViewMode === "operational" ? "bg-zinc-900 text-white" : "bg-white text-zinc-700"
+              }`}
+            >
+              Operational View
+            </button>
+          </div>
           <select
             value={tenantId}
             onChange={(event) => setTenantId(event.target.value)}
-            className="ml-auto rounded border px-2 py-1 text-sm"
+            className="rounded border px-2 py-1 text-sm"
           >
             {tenants.map((tenant) => (
               <option key={tenant.id} value={tenant.id}>
@@ -886,6 +948,10 @@ export function InboxClient({
                   {selectedWork ? (
                     <>
                       <div className="rounded border p-3">
+                        {(() => {
+                          const context = operationalContextForWork(selectedWork);
+                          return (
+                            <>
                         <p className="font-medium">{selectedWork.title}</p>
                         <p className="text-zinc-700">{selectedWork.summary}</p>
                         <p className="mt-1 text-xs text-zinc-500">
@@ -895,6 +961,33 @@ export function InboxClient({
                           Assigned Team:{" "}
                           {orgUnitById(selectedWork.assigned_org_unit_id)?.name ?? "Unassigned"}
                         </p>
+                              {contextViewMode === "operational" ? (
+                                <div className="mt-2 space-y-1 text-xs text-zinc-700">
+                                  <p>
+                                    <span className="font-medium">Business Meaning:</span>{" "}
+                                    {context.businessMeaning}
+                                  </p>
+                                  <p>
+                                    <span className="font-medium">Operational Impact:</span>{" "}
+                                    {context.operationalImpact}
+                                  </p>
+                                  <p>
+                                    <span className="font-medium">Risk Level:</span> {context.riskLevel}
+                                  </p>
+                                  <p>
+                                    <span className="font-medium">Urgency:</span> {context.urgency}
+                                  </p>
+                                  <p>
+                                    <span className="font-medium">Downstream Effects:</span>{" "}
+                                    {context.downstreamEffects.length > 0
+                                      ? context.downstreamEffects.join(" • ")
+                                      : "Requires classification or mapping"}
+                                  </p>
+                                </div>
+                              ) : null}
+                            </>
+                          );
+                        })()}
                       </div>
                       <IngressRecommendationsCard
                         recommendations={selectedWork.recommended_actions ?? []}
@@ -914,9 +1007,18 @@ export function InboxClient({
       {tab === "work" ? (
         <section className="rounded-lg border p-4">
           <h2 className="mb-3 text-lg font-semibold">Work</h2>
+          {contextViewMode === "raw" ? (
+            <p className="mb-3 text-xs text-zinc-500">
+              Raw view is intentionally reduced and omits operational interpretation.
+            </p>
+          ) : null}
           <div className="space-y-2">
             {workItems.map((work) => (
               <div key={work.id} className="rounded border p-3 text-sm">
+                {(() => {
+                  const context = operationalContextForWork(work);
+                  return (
+                    <>
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-medium">{work.title}</p>
                   <IngressStatusBadge status={work.status} />
@@ -941,6 +1043,32 @@ export function InboxClient({
                 <p className="text-xs text-zinc-500">
                   Location in Org: {formatRoutingPath(work.routing_path) || "Not routed"}
                 </p>
+                      {contextViewMode === "operational" ? (
+                        <div className="mt-2 rounded border bg-zinc-50 p-2 text-xs text-zinc-700">
+                          <p>
+                            <span className="font-medium">Business Meaning:</span> {context.businessMeaning}
+                          </p>
+                          <p>
+                            <span className="font-medium">Operational Impact:</span>{" "}
+                            {context.operationalImpact}
+                          </p>
+                          <p>
+                            <span className="font-medium">Downstream Effects:</span>{" "}
+                            {context.downstreamEffects.length > 0
+                              ? context.downstreamEffects.join(" • ")
+                              : "Requires classification or mapping"}
+                          </p>
+                          <p>
+                            <span className="font-medium">Risk Level:</span> {context.riskLevel}
+                          </p>
+                          <p>
+                            <span className="font-medium">Urgency:</span> {context.urgency}
+                          </p>
+                        </div>
+                      ) : null}
+                    </>
+                  );
+                })()}
                 {(work.applied_rules ?? []).length > 0 ? (
                   <div className="mt-1 rounded border bg-zinc-50 p-2 text-xs text-zinc-600">
                     {(work.applied_rules ?? []).map((rule) => (

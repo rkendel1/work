@@ -1,6 +1,41 @@
 import { mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
 
+const operationalContextValidator = v.object({
+  summary: v.string(),
+  businessMeaning: v.string(),
+  operationalImpact: v.string(),
+  downstreamEffects: v.array(v.string()),
+  riskLevel: v.string(),
+  urgency: v.string(),
+  relatedProcesses: v.array(v.string()),
+  lastComputedAt: v.number(),
+});
+
+function fallbackOperationalContext(args: {
+  classificationType: string;
+  summary: string;
+  status: string;
+}) {
+  return {
+    summary: args.summary,
+    businessMeaning: `Operational signal classified as ${args.classificationType.replaceAll("_", " ")}.`,
+    operationalImpact:
+      args.status === "open"
+        ? "Requires routing and action selection to avoid unresolved operational risk."
+        : "Operational state updated; continue monitoring until closure.",
+    downstreamEffects: [
+      "Potential SLA variance",
+      "Cross-team coordination load",
+      "Service quality impact",
+    ],
+    riskLevel: "medium",
+    urgency: args.status === "open" ? "soon" : "routine",
+    relatedProcesses: ["signal_triage", "work_routing", "resolution_tracking"],
+    lastComputedAt: Date.now(),
+  };
+}
+
 export const ingestInboxItem = mutationGeneric({
   args: {
     tenantId: v.string(),
@@ -155,8 +190,28 @@ export const createWorkItem = mutationGeneric({
         }),
       ),
     ),
+    operationalContext: v.optional(operationalContextValidator),
   },
   handler: async (ctx, args) => {
+    const context = args.operationalContext ?? fallbackOperationalContext(args);
+    const contextRecord = {
+      tenantId: args.tenantId,
+      entityType: "work_item",
+      entityId: args.externalId,
+      ...context,
+    };
+    const existingContext = await ctx.db
+      .query("operational_context")
+      .withIndex("by_tenant_entity", (query) =>
+        query.eq("tenantId", contextRecord.tenantId),
+      )
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("entityType"), contextRecord.entityType),
+          query.eq(query.field("entityId"), contextRecord.entityId),
+        ),
+      )
+      .first();
     const existing = (
       await ctx.db
       .query("work_items")
@@ -167,6 +222,11 @@ export const createWorkItem = mutationGeneric({
     ).find((item) => item.externalId === args.externalId);
 
     if (existing) {
+      if (existingContext) {
+        await ctx.db.patch(existingContext._id, contextRecord);
+      } else {
+        await ctx.db.insert("operational_context", contextRecord);
+      }
       return existing._id;
     }
 
@@ -200,7 +260,7 @@ export const createWorkItem = mutationGeneric({
     }
     routingPath.reverse();
 
-    return await ctx.db.insert("work_items", {
+    const workItemId = await ctx.db.insert("work_items", {
       tenantId: args.tenantId,
       externalId: args.externalId,
       inboxExternalId: args.inboxExternalId,
@@ -213,6 +273,14 @@ export const createWorkItem = mutationGeneric({
       routingPath,
       recommendedActions: args.recommendedActions,
     });
+
+    if (existingContext) {
+      await ctx.db.patch(existingContext._id, contextRecord);
+    } else {
+      await ctx.db.insert("operational_context", contextRecord);
+    }
+
+    return workItemId;
   },
 });
 
