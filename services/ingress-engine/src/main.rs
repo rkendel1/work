@@ -51,6 +51,28 @@ struct WorkItem {
     recommended_actions: Vec<RecommendedAction>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActionSelection {
+    id: Uuid,
+    tenant_id: String,
+    work_item_id: Uuid,
+    system_action: String,
+    tenant_action: String,
+    selected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkOutcome {
+    id: Uuid,
+    tenant_id: String,
+    work_item_id: Uuid,
+    selected_action_id: Option<String>,
+    status: String,
+    resolution_notes: Option<String>,
+    feedback: Option<String>,
+    completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IngestRequest {
@@ -169,6 +191,24 @@ struct CreateActionRequest {
     active: Option<bool>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectWorkActionRequest {
+    system_action: String,
+    tenant_action: Option<String>,
+    selected_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordWorkOutcomeRequest {
+    selected_action_id: Option<String>,
+    status: String,
+    resolution_notes: Option<String>,
+    feedback: Option<String>,
+    completed_at: Option<i64>,
+}
+
 struct State {
     inbox_items: Vec<InboxItem>,
     ingress_events: Vec<IngressEvent>,
@@ -176,6 +216,8 @@ struct State {
     tenants: Vec<Tenant>,
     actions: Vec<ActionDefinition>,
     classifications: Vec<ClassificationDefinition>,
+    action_selections: Vec<ActionSelection>,
+    work_outcomes: Vec<WorkOutcome>,
 }
 
 const DEFAULT_TENANT_ID: &str = "default";
@@ -202,6 +244,8 @@ impl Default for State {
             tenants: vec![default_tenant],
             actions,
             classifications,
+            action_selections: Vec::new(),
+            work_outcomes: Vec::new(),
         }
     }
 }
@@ -330,6 +374,21 @@ fn resolve_tenant_id(tenant_id: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_TENANT_ID)
         .to_string()
+}
+
+fn datetime_from_unix_timestamp(timestamp: i64) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+}
+
+fn is_valid_outcome_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "escalated" | "duplicate" | "irrelevant"
+    )
+}
+
+fn is_valid_feedback(feedback: &str) -> bool {
+    matches!(feedback, "correct" | "wrong" | "partial" | "escalated")
 }
 
 fn load_pack(vertical: &str, industry: &str) -> OperationalPack {
@@ -830,6 +889,28 @@ struct ConvexBootstrapTenantFromPackArgs {
     industry: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexActionSelectionArgs {
+    tenant_id: String,
+    work_item_external_id: String,
+    system_action: String,
+    tenant_action: String,
+    selected_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexWorkOutcomeArgs {
+    tenant_id: String,
+    work_item_external_id: String,
+    selected_action_id: Option<String>,
+    status: String,
+    resolution_notes: Option<String>,
+    feedback: Option<String>,
+    completed_at: Option<i64>,
+}
+
 async fn send_convex_mutation<T: Serialize>(
     client: &Client,
     convex_config: &ConvexConfig,
@@ -962,6 +1043,48 @@ async fn forward_status_update_to_convex(
             event_type: event.event_type.clone(),
             description: event.description.clone(),
             created_at: event.created_at.timestamp(),
+        },
+    )
+    .await
+}
+
+async fn forward_action_selection_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    selection: &ActionSelection,
+) -> Result<(), String> {
+    send_convex_mutation(
+        client,
+        convex_config,
+        "inbox:recordActionSelection",
+        ConvexActionSelectionArgs {
+            tenant_id: selection.tenant_id.clone(),
+            work_item_external_id: selection.work_item_id.to_string(),
+            system_action: selection.system_action.clone(),
+            tenant_action: selection.tenant_action.clone(),
+            selected_at: selection.selected_at.timestamp(),
+        },
+    )
+    .await
+}
+
+async fn forward_work_outcome_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    outcome: &WorkOutcome,
+) -> Result<(), String> {
+    send_convex_mutation(
+        client,
+        convex_config,
+        "inbox:recordWorkOutcome",
+        ConvexWorkOutcomeArgs {
+            tenant_id: outcome.tenant_id.clone(),
+            work_item_external_id: outcome.work_item_id.to_string(),
+            selected_action_id: outcome.selected_action_id.clone(),
+            status: outcome.status.clone(),
+            resolution_notes: outcome.resolution_notes.clone(),
+            feedback: outcome.feedback.clone(),
+            completed_at: outcome.completed_at.map(|completed_at| completed_at.timestamp()),
         },
     )
     .await
@@ -1394,6 +1517,163 @@ async fn list_work(
     HttpResponse::Ok().json(work_items)
 }
 
+async fn select_work_action(
+    data: web::Data<AppState>,
+    work_item_id: web::Path<Uuid>,
+    request: web::Json<SelectWorkActionRequest>,
+) -> impl Responder {
+    let system_action = request.system_action.trim();
+    if system_action.is_empty() {
+        return HttpResponse::BadRequest().body("systemAction is required");
+    }
+
+    let selected_at = request
+        .selected_at
+        .and_then(datetime_from_unix_timestamp)
+        .unwrap_or_else(Utc::now);
+    let (selection, ingress_event, ingress_id) = {
+        let mut state = lock_state(&data);
+        let Some(work_item) = state
+            .work_items
+            .iter_mut()
+            .find(|work_item| work_item.id == *work_item_id)
+        else {
+            return HttpResponse::NotFound().body("work item not found");
+        };
+
+        let tenant_id = work_item.tenant_id.clone();
+        let ingress_id = work_item.inbox_item_id;
+        let tenant_action = request
+            .tenant_action
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(system_action)
+            .to_string();
+        work_item.status = "in_progress".to_string();
+
+        let selection = ActionSelection {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.clone(),
+            work_item_id: work_item.id,
+            system_action: system_action.to_string(),
+            tenant_action: tenant_action.clone(),
+            selected_at,
+        };
+        state.action_selections.push(selection.clone());
+        let ingress_event = create_ingress_event(
+            &mut state,
+            ingress_id,
+            tenant_id,
+            "action_selected".to_string(),
+            format!("Selected action: {tenant_action}"),
+        );
+        (selection, ingress_event, ingress_id)
+    };
+
+    if let Err(error) = forward_action_selection_to_convex(&data.client, &data.convex_config, &selection).await
+    {
+        eprintln!("failed to forward action selection to convex: {error}");
+    }
+    if let Err(error) = forward_ingress_event_to_convex(
+        &data.client,
+        &data.convex_config,
+        ingress_id,
+        &ingress_event,
+    )
+    .await
+    {
+        eprintln!("failed to forward action selection event to convex: {error}");
+    }
+
+    HttpResponse::Created().json(selection)
+}
+
+async fn record_work_outcome(
+    data: web::Data<AppState>,
+    work_item_id: web::Path<Uuid>,
+    request: web::Json<RecordWorkOutcomeRequest>,
+) -> impl Responder {
+    let status = request.status.trim().to_lowercase();
+    if !is_valid_outcome_status(&status) {
+        return HttpResponse::BadRequest()
+            .body("status must be one of: completed, failed, escalated, duplicate, irrelevant");
+    }
+
+    let feedback = request
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    if let Some(feedback_value) = feedback.as_deref()
+        && !is_valid_feedback(feedback_value)
+    {
+        return HttpResponse::BadRequest()
+            .body("feedback must be one of: correct, wrong, partial, escalated");
+    }
+
+    let completed_at = request
+        .completed_at
+        .and_then(datetime_from_unix_timestamp)
+        .unwrap_or_else(Utc::now);
+    let (outcome, close_event, ingress_id) = {
+        let mut state = lock_state(&data);
+        let Some(work_item) = state
+            .work_items
+            .iter_mut()
+            .find(|work_item| work_item.id == *work_item_id)
+        else {
+            return HttpResponse::NotFound().body("work item not found");
+        };
+
+        work_item.status = status.clone();
+        let tenant_id = work_item.tenant_id.clone();
+        let ingress_id = work_item.inbox_item_id;
+        let outcome = WorkOutcome {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.clone(),
+            work_item_id: work_item.id,
+            selected_action_id: request
+                .selected_action_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            status: status.clone(),
+            resolution_notes: request
+                .resolution_notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            feedback,
+            completed_at: Some(completed_at),
+        };
+        state.work_outcomes.push(outcome.clone());
+        let close_event = update_ingress_status(
+            &mut state,
+            ingress_id,
+            "closed",
+            format!("Outcome recorded: {}", outcome.status),
+        );
+        (outcome, close_event, ingress_id)
+    };
+
+    if let Err(error) = forward_work_outcome_to_convex(&data.client, &data.convex_config, &outcome).await {
+        eprintln!("failed to forward work outcome to convex: {error}");
+    }
+    if let Some(close_event) = close_event
+        && let Err(error) =
+            forward_status_update_to_convex(&data.client, &data.convex_config, ingress_id, &close_event)
+                .await
+    {
+        eprintln!("failed to forward closed status update to convex: {error}");
+    }
+
+    HttpResponse::Created().json(outcome)
+}
+
 async fn item_timeline(
     data: web::Data<AppState>,
     inbox_item_id: web::Path<Uuid>,
@@ -1424,6 +1704,8 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/items", web::get().to(list_items))
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
+        .route("/work/{id}/selection", web::post().to(select_work_action))
+        .route("/work/{id}/outcome", web::post().to(record_work_outcome))
         .route("/webhooks/postmark", web::post().to(postmark_inbound));
 }
 
@@ -1619,6 +1901,101 @@ mod tests {
                 "work_generated".to_string()
             ]
         );
+    }
+
+    #[actix_web::test]
+    async fn action_selection_and_outcome_close_the_work_loop() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in suite 201",
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let select_action_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/selection", work_item.id))
+            .set_json(&serde_json::json!({
+                "systemAction": "Inspect HVAC Unit",
+                "tenantAction": "Inspect HVAC Unit",
+            }))
+            .to_request();
+        let selection: ActionSelection =
+            test::call_and_read_body_json(&app, select_action_req).await;
+        assert_eq!(selection.work_item_id, work_item.id);
+        assert_eq!(selection.system_action, "Inspect HVAC Unit");
+
+        let record_outcome_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/outcome", work_item.id))
+            .set_json(&serde_json::json!({
+                "selectedActionId": "Inspect HVAC Unit",
+                "status": "completed",
+                "feedback": "correct",
+                "resolutionNotes": "Resolved after onsite repair"
+            }))
+            .to_request();
+        let outcome: WorkOutcome = test::call_and_read_body_json(&app, record_outcome_req).await;
+        assert_eq!(outcome.status, "completed");
+        assert_eq!(outcome.feedback.as_deref(), Some("correct"));
+
+        let work_req = test::TestRequest::get().uri("/work").to_request();
+        let work: Vec<WorkItem> = test::call_and_read_body_json(&app, work_req).await;
+        assert_eq!(work[0].status, "completed");
+
+        let timeline_req = test::TestRequest::get()
+            .uri(&format!("/items/{}/timeline", inbox_item.id))
+            .to_request();
+        let timeline: Vec<IngressTimelineEntry> =
+            test::call_and_read_body_json(&app, timeline_req).await;
+        let event_types: Vec<String> = timeline
+            .iter()
+            .map(|event| event.entry_type.clone())
+            .collect();
+        assert!(event_types.iter().any(|entry| entry == "action_selected"));
+        assert!(event_types.iter().any(|entry| entry == "closed"));
+    }
+
+    #[actix_web::test]
+    async fn outcome_rejects_invalid_status() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in suite 201",
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let record_outcome_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/outcome", work_item.id))
+            .set_json(&serde_json::json!({
+                "status": "open",
+                "feedback": "correct"
+            }))
+            .to_request();
+        let response = test::call_service(&app, record_outcome_req).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]

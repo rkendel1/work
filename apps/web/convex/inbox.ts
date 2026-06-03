@@ -156,6 +156,156 @@ export const createWorkItem = mutationGeneric({
   },
 });
 
+export const recordActionSelection = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    workItemExternalId: v.string(),
+    systemAction: v.string(),
+    tenantAction: v.string(),
+    selectedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const workItem = (
+      await ctx.db
+        .query("work_items")
+        .withIndex("by_tenant_external_id", (query) =>
+          query.eq("tenantId", args.tenantId),
+        )
+        .collect()
+    ).find((item) => item.externalId === args.workItemExternalId);
+
+    if (!workItem) {
+      throw new Error("work item not found");
+    }
+
+    const existingActionMapping = await ctx.db
+      .query("action_mappings")
+      .withIndex("by_tenant_system_action", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("systemAction"), args.systemAction))
+      .first();
+
+    if (existingActionMapping) {
+      await ctx.db.patch(existingActionMapping._id, {
+        tenantAction: args.tenantAction,
+      });
+    } else {
+      await ctx.db.insert("action_mappings", {
+        tenantId: args.tenantId,
+        systemAction: args.systemAction,
+        tenantAction: args.tenantAction,
+        confidence: 0.5,
+      });
+    }
+
+    return await ctx.db.insert("action_selections", {
+      tenantId: args.tenantId,
+      workItemId: workItem._id,
+      systemAction: args.systemAction,
+      tenantAction: args.tenantAction,
+      selectedAt: args.selectedAt ?? Date.now(),
+    });
+  },
+});
+
+export const recordWorkOutcome = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    workItemExternalId: v.string(),
+    selectedActionId: v.optional(v.string()),
+    status: v.string(),
+    resolutionNotes: v.optional(v.string()),
+    feedback: v.optional(v.string()),
+    completedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const workItem = (
+      await ctx.db
+        .query("work_items")
+        .withIndex("by_tenant_external_id", (query) =>
+          query.eq("tenantId", args.tenantId),
+        )
+        .collect()
+    ).find((item) => item.externalId === args.workItemExternalId);
+
+    if (!workItem) {
+      throw new Error("work item not found");
+    }
+
+    await ctx.db.patch(workItem._id, {
+      status: args.status,
+    });
+
+    const outcomeId = await ctx.db.insert("work_outcomes", {
+      tenantId: args.tenantId,
+      workItemId: workItem._id,
+      selectedActionId: args.selectedActionId,
+      status: args.status,
+      resolutionNotes: args.resolutionNotes,
+      feedback: args.feedback,
+      completedAt: args.completedAt ?? Date.now(),
+    });
+
+    if (args.feedback) {
+      const feedbackDelta =
+        args.feedback === "correct"
+          ? 0.05
+          : args.feedback === "partial"
+            ? 0.02
+            : args.feedback === "wrong"
+              ? -0.05
+              : -0.02;
+
+      const classificationMapping = await ctx.db
+        .query("term_mappings")
+        .withIndex("by_tenant_system_term_type", (query) =>
+          query.eq("tenantId", args.tenantId),
+        )
+        .filter((query) =>
+          query.and(
+            query.eq(query.field("systemTerm"), workItem.classificationType),
+            query.eq(query.field("type"), "classification"),
+          ),
+        )
+        .first();
+
+      if (classificationMapping) {
+        const existingConfidence = classificationMapping.confidence ?? 0.5;
+        await ctx.db.patch(classificationMapping._id, {
+          confidence: Math.max(0, Math.min(1, existingConfidence + feedbackDelta)),
+        });
+      }
+
+      if (args.selectedActionId) {
+        const actionMapping = await ctx.db
+          .query("action_mappings")
+          .withIndex("by_tenant_system_action", (query) =>
+            query.eq("tenantId", args.tenantId),
+          )
+          .filter((query) => query.eq(query.field("systemAction"), args.selectedActionId))
+          .first();
+
+        if (actionMapping) {
+          const existingConfidence = actionMapping.confidence ?? 0.5;
+          await ctx.db.patch(actionMapping._id, {
+            confidence: Math.max(0, Math.min(1, existingConfidence + feedbackDelta)),
+          });
+        } else {
+          await ctx.db.insert("action_mappings", {
+            tenantId: args.tenantId,
+            systemAction: args.selectedActionId,
+            tenantAction: args.selectedActionId,
+            confidence: Math.max(0, Math.min(1, 0.5 + feedbackDelta)),
+          });
+        }
+      }
+    }
+
+    return outcomeId;
+  },
+});
+
 export const listInboxItems = queryGeneric({
   args: {
     tenantId: v.string(),

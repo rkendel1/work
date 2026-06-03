@@ -99,10 +99,31 @@ export default defineSchema({
     tenantId: v.string(),
     systemAction: v.string(),
     tenantAction: v.string(),
+    confidence: v.optional(v.number()),
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_system_action", ["tenantId", "systemAction"])
     .index("by_tenant_tenant_action", ["tenantId", "tenantAction"]),
+  action_selections: defineTable({
+    tenantId: v.string(),
+    workItemId: v.id("work_items"),
+    systemAction: v.string(),
+    tenantAction: v.string(),
+    selectedAt: v.number(),
+  })
+    .index("by_work_item_selected_at", ["workItemId", "selectedAt"])
+    .index("by_tenant_selected_at", ["tenantId", "selectedAt"]),
+  work_outcomes: defineTable({
+    tenantId: v.string(),
+    workItemId: v.id("work_items"),
+    selectedActionId: v.optional(v.string()),
+    status: v.string(),
+    resolutionNotes: v.optional(v.string()),
+    feedback: v.optional(v.string()),
+    completedAt: v.optional(v.number()),
+  })
+    .index("by_work_item_completed_at", ["workItemId", "completedAt"])
+    .index("by_tenant_completed_at", ["tenantId", "completedAt"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),
