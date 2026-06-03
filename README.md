@@ -193,6 +193,17 @@ For Rust ingress (`services/rust-api` environment):
 - `CONVEX_ADMIN_KEY`
 - `VAULT_ENCRYPTION_KEY` (optional base64-encoded 32-byte key for tenant secret encryption)
 
+For Fly deployments, set required runtime secrets on the Fly app before deploy:
+
+```bash
+fly secrets set \
+  CONVEX_URL="https://your-convex-url" \
+  CONVEX_ADMIN_KEY="your-convex-admin-key" \
+  -a rusty-api
+
+fly secrets list -a rusty-api
+```
+
 Yes — that’s the cleanest version of the thesis so far, and it’s actually the first one that feels sharp enough to build toward without drifting into generic “AI ops tool” territory.
 
 But I’d tighten it slightly so it’s not just descriptive — it needs a wedge.
