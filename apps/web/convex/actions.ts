@@ -219,6 +219,29 @@ export const createTenant = mutationGeneric({
     industry: v.string(),
   },
   handler: async (ctx, args) => {
+    const upsertCrosswalk = async (entry: {
+      tenantId: string;
+      vertical: string;
+      industry: string;
+      systemConcept: string;
+      tenantTerm: string;
+      description: string;
+      source: string;
+      confidence: number;
+    }) => {
+      const existing = await ctx.db
+        .query("operational_crosswalk")
+        .withIndex("by_tenant_system_concept", (query) => query.eq("tenantId", entry.tenantId))
+        .filter((query) => query.eq(query.field("systemConcept"), entry.systemConcept))
+        .first();
+      const payload = { ...entry, updatedAt: Date.now() };
+      if (existing) {
+        await ctx.db.patch(existing._id, payload);
+        return existing._id;
+      }
+      return await ctx.db.insert("operational_crosswalk", payload);
+    };
+
     const existing = await ctx.db
       .query("tenants")
       .withIndex("by_slug", (query) => query.eq("slug", args.slug))
@@ -272,23 +295,16 @@ export const createTenant = mutationGeneric({
         });
       }
 
-      const existingTermMapping = await ctx.db
-        .query("term_mappings")
-        .withIndex("by_tenant_system_term_type", (query) =>
-          query.eq("tenantId", args.id),
-        )
-        .filter((query) => query.eq(query.field("systemTerm"), classification.type))
-        .filter((query) => query.eq(query.field("type"), "classification"))
-        .first();
-      if (!existingTermMapping) {
-        await ctx.db.insert("term_mappings", {
-          tenantId: args.id,
-          systemTerm: classification.type,
-          tenantTerm: labelFromSystemTerm(classification.type),
-          type: "classification",
-          confidence: 1,
-        });
-      }
+      await upsertCrosswalk({
+        tenantId: args.id,
+        vertical: pack.vertical,
+        industry: pack.industry,
+        systemConcept: classification.type,
+        tenantTerm: labelFromSystemTerm(classification.type),
+        description: classification.description,
+        source: "pack",
+        confidence: 1,
+      });
     }
     for (const action of pack.actions) {
       const existing = await ctx.db
@@ -313,20 +329,16 @@ export const createTenant = mutationGeneric({
         });
       }
 
-      const existingActionMapping = await ctx.db
-        .query("action_mappings")
-        .withIndex("by_tenant_system_action", (query) =>
-          query.eq("tenantId", args.id),
-        )
-        .filter((query) => query.eq(query.field("systemAction"), action.name))
-        .first();
-      if (!existingActionMapping) {
-        await ctx.db.insert("action_mappings", {
-          tenantId: args.id,
-          systemAction: action.name,
-          tenantAction: action.name,
-        });
-      }
+      await upsertCrosswalk({
+        tenantId: args.id,
+        vertical: pack.vertical,
+        industry: pack.industry,
+        systemConcept: action.name,
+        tenantTerm: action.name,
+        description: action.description,
+        source: "pack",
+        confidence: 1,
+      });
     }
     return tenantRecordId;
   },
@@ -352,19 +364,26 @@ export const createAction = mutationGeneric({
   },
   handler: async (ctx, args) => {
     const actionId = await ctx.db.insert("actions", args);
-    const existingActionMapping = await ctx.db
-      .query("action_mappings")
-      .withIndex("by_tenant_system_action", (query) =>
-        query.eq("tenantId", args.tenantId),
-      )
-      .filter((query) => query.eq(query.field("systemAction"), args.name))
+    const existingCrosswalk = await ctx.db
+      .query("operational_crosswalk")
+      .withIndex("by_tenant_system_concept", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) => query.eq(query.field("systemConcept"), args.name))
       .first();
-    if (!existingActionMapping) {
-      await ctx.db.insert("action_mappings", {
-        tenantId: args.tenantId,
-        systemAction: args.name,
-        tenantAction: args.name,
-      });
+    const crosswalkRecord = {
+      tenantId: args.tenantId,
+      vertical: "unknown",
+      industry: "unknown",
+      systemConcept: args.name,
+      tenantTerm: args.name,
+      description: args.description,
+      source: "user_defined",
+      confidence: 1,
+      updatedAt: Date.now(),
+    };
+    if (existingCrosswalk) {
+      await ctx.db.patch(existingCrosswalk._id, crosswalkRecord);
+    } else {
+      await ctx.db.insert("operational_crosswalk", crosswalkRecord);
     }
     return actionId;
   },
@@ -412,6 +431,29 @@ export const bootstrapTenantFromPack = mutationGeneric({
     industry: v.string(),
   },
   handler: async (ctx, args) => {
+    const upsertCrosswalk = async (entry: {
+      tenantId: string;
+      vertical: string;
+      industry: string;
+      systemConcept: string;
+      tenantTerm: string;
+      description: string;
+      source: string;
+      confidence: number;
+    }) => {
+      const existing = await ctx.db
+        .query("operational_crosswalk")
+        .withIndex("by_tenant_system_concept", (query) => query.eq("tenantId", entry.tenantId))
+        .filter((query) => query.eq(query.field("systemConcept"), entry.systemConcept))
+        .first();
+      const payload = { ...entry, updatedAt: Date.now() };
+      if (existing) {
+        await ctx.db.patch(existing._id, payload);
+        return existing._id;
+      }
+      return await ctx.db.insert("operational_crosswalk", payload);
+    };
+
     const pack = loadOperationalPack(args.vertical, args.industry);
     const orgUnitIdsByName = new Map<string, string>();
     for (const template of orgUnitTemplatesForPack(pack)) {
@@ -457,21 +499,16 @@ export const bootstrapTenantFromPack = mutationGeneric({
         });
       }
 
-      const existingTermMapping = await ctx.db
-        .query("term_mappings")
-        .withIndex("by_tenant_system_term_type", (query) => query.eq("tenantId", args.tenantId))
-        .filter((query) => query.eq(query.field("systemTerm"), classification.type))
-        .filter((query) => query.eq(query.field("type"), "classification"))
-        .first();
-      if (!existingTermMapping) {
-        await ctx.db.insert("term_mappings", {
-          tenantId: args.tenantId,
-          systemTerm: classification.type,
-          tenantTerm: labelFromSystemTerm(classification.type),
-          type: "classification",
-          confidence: 1,
-        });
-      }
+      await upsertCrosswalk({
+        tenantId: args.tenantId,
+        vertical: pack.vertical,
+        industry: pack.industry,
+        systemConcept: classification.type,
+        tenantTerm: labelFromSystemTerm(classification.type),
+        description: classification.description,
+        source: "pack",
+        confidence: 1,
+      });
     }
 
     for (const action of pack.actions) {
@@ -497,20 +534,16 @@ export const bootstrapTenantFromPack = mutationGeneric({
         });
       }
 
-      const existingActionMapping = await ctx.db
-        .query("action_mappings")
-        .withIndex("by_tenant_system_action", (query) =>
-          query.eq("tenantId", args.tenantId),
-        )
-        .filter((query) => query.eq(query.field("systemAction"), action.name))
-        .first();
-      if (!existingActionMapping) {
-        await ctx.db.insert("action_mappings", {
-          tenantId: args.tenantId,
-          systemAction: action.name,
-          tenantAction: action.name,
-        });
-      }
+      await upsertCrosswalk({
+        tenantId: args.tenantId,
+        vertical: pack.vertical,
+        industry: pack.industry,
+        systemConcept: action.name,
+        tenantTerm: action.name,
+        description: action.description,
+        source: "pack",
+        confidence: 1,
+      });
     }
 
     return pack;
@@ -527,22 +560,26 @@ export const upsertTermMapping = mutationGeneric({
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
-      .query("term_mappings")
-      .withIndex("by_tenant_system_term_type", (query) =>
-        query.eq("tenantId", args.tenantId),
-      )
-      .filter((query) => query.eq(query.field("systemTerm"), args.systemTerm))
-      .filter((query) => query.eq(query.field("type"), args.type))
+      .query("operational_crosswalk")
+      .withIndex("by_tenant_system_concept", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) => query.eq(query.field("systemConcept"), args.systemTerm))
       .first();
+    const record = {
+      tenantId: args.tenantId,
+      vertical: "unknown",
+      industry: "unknown",
+      systemConcept: args.systemTerm,
+      tenantTerm: args.tenantTerm,
+      description: `${args.type} mapping`,
+      source: "user_defined",
+      confidence: args.confidence ?? 0.5,
+      updatedAt: Date.now(),
+    };
     if (existing) {
-      await ctx.db.patch(existing._id, {
-        tenantTerm: args.tenantTerm,
-        confidence: args.confidence,
-      });
+      await ctx.db.patch(existing._id, record);
       return existing._id;
     }
-
-    return await ctx.db.insert("term_mappings", args);
+    return await ctx.db.insert("operational_crosswalk", record);
   },
 });
 
@@ -552,7 +589,7 @@ export const listTermMappings = queryGeneric({
   },
   handler: async (ctx, args) => {
     return await ctx.db
-      .query("term_mappings")
+      .query("operational_crosswalk")
       .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
       .collect();
   },
@@ -566,20 +603,26 @@ export const upsertActionMapping = mutationGeneric({
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
-      .query("action_mappings")
-      .withIndex("by_tenant_system_action", (query) =>
-        query.eq("tenantId", args.tenantId),
-      )
-      .filter((query) => query.eq(query.field("systemAction"), args.systemAction))
+      .query("operational_crosswalk")
+      .withIndex("by_tenant_system_concept", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) => query.eq(query.field("systemConcept"), args.systemAction))
       .first();
+    const record = {
+      tenantId: args.tenantId,
+      vertical: "unknown",
+      industry: "unknown",
+      systemConcept: args.systemAction,
+      tenantTerm: args.tenantAction,
+      description: "action mapping",
+      source: "user_defined",
+      confidence: 0.5,
+      updatedAt: Date.now(),
+    };
     if (existing) {
-      await ctx.db.patch(existing._id, {
-        tenantAction: args.tenantAction,
-      });
+      await ctx.db.patch(existing._id, record);
       return existing._id;
     }
-
-    return await ctx.db.insert("action_mappings", args);
+    return await ctx.db.insert("operational_crosswalk", record);
   },
 });
 
@@ -589,7 +632,7 @@ export const listActionMappings = queryGeneric({
   },
   handler: async (ctx, args) => {
     return await ctx.db
-      .query("action_mappings")
+      .query("operational_crosswalk")
       .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
       .collect();
   },

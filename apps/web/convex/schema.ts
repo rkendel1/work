@@ -58,21 +58,35 @@ export default defineSchema({
     .index("by_inbox_external_id", ["inboxExternalId"])
     .index("by_tenant_external_id", ["tenantId", "externalId"])
     .index("by_tenant_inbox_external_id", ["tenantId", "inboxExternalId"]),
-  operational_context: defineTable({
+  operational_crosswalk: defineTable({
+    tenantId: v.string(),
+    vertical: v.string(),
+    industry: v.string(),
+    systemConcept: v.string(),
+    tenantTerm: v.string(),
+    description: v.string(),
+    source: v.string(),
+    confidence: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_system_concept", ["tenantId", "systemConcept"])
+    .index("by_tenant_tenant_term", ["tenantId", "tenantTerm"]),
+  operational_meanings: defineTable({
     tenantId: v.string(),
     entityType: v.string(),
     entityId: v.string(),
-    summary: v.string(),
-    businessMeaning: v.string(),
-    operationalImpact: v.string(),
-    downstreamEffects: v.array(v.string()),
-    riskLevel: v.string(),
-    urgency: v.string(),
-    relatedProcesses: v.array(v.string()),
-    lastComputedAt: v.number(),
+    systemConcept: v.string(),
+    inferredMeaning: v.string(),
+    state: v.string(),
+    confidence: v.number(),
+    evidence: v.array(v.string()),
+    crosswalkVersion: v.optional(v.string()),
+    updatedAt: v.number(),
   })
     .index("by_tenant_entity", ["tenantId", "entityType", "entityId"])
-    .index("by_tenant_entity_type", ["tenantId", "entityType"]),
+    .index("by_tenant_state", ["tenantId", "state"])
+    .index("by_tenant_system_concept", ["tenantId", "systemConcept"]),
   users: defineTable({
     tenantId: v.optional(v.string()),
     handle: v.optional(v.string()),
@@ -151,25 +165,6 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_type", ["tenantId", "type"]),
-  term_mappings: defineTable({
-    tenantId: v.string(),
-    systemTerm: v.string(),
-    tenantTerm: v.string(),
-    type: v.string(),
-    confidence: v.optional(v.number()),
-  })
-    .index("by_tenant", ["tenantId"])
-    .index("by_tenant_system_term_type", ["tenantId", "systemTerm", "type"])
-    .index("by_tenant_tenant_term_type", ["tenantId", "tenantTerm", "type"]),
-  action_mappings: defineTable({
-    tenantId: v.string(),
-    systemAction: v.string(),
-    tenantAction: v.string(),
-    confidence: v.optional(v.number()),
-  })
-    .index("by_tenant", ["tenantId"])
-    .index("by_tenant_system_action", ["tenantId", "systemAction"])
-    .index("by_tenant_tenant_action", ["tenantId", "tenantAction"]),
   action_selections: defineTable({
     tenantId: v.string(),
     workItemId: v.id("work_items"),
