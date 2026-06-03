@@ -287,7 +287,9 @@ export function InboxClient({
   initialInboxItems,
   initialWorkItems,
 }: InboxClientProps) {
-  const [tab, setTab] = useState<Tab>("inbox");
+  const [tab, setTab] = useState<Tab>(
+    initialInboxItems.length === 0 && initialWorkItems.length === 0 ? "settings" : "inbox",
+  );
   const [contextViewMode, setContextViewMode] = useState<ContextViewMode>("operational");
   const [tenantId, setTenantId] = useState("default");
   const [source, setSource] = useState("manual");
