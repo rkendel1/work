@@ -42,3 +42,29 @@ pub enum DomainEvent {
         key_id: String,
     },
 }
+
+impl DomainEvent {
+    pub fn tenant_id(&self) -> &str {
+        match self {
+            DomainEvent::SignalReceived { tenant_id, .. }
+            | DomainEvent::IngressCreated { tenant_id, .. }
+            | DomainEvent::SignalClassified { tenant_id, .. }
+            | DomainEvent::WorkCreated { tenant_id, .. }
+            | DomainEvent::WorkRouted { tenant_id, .. }
+            | DomainEvent::ActionExecuted { tenant_id, .. }
+            | DomainEvent::VaultKeyUpdated { tenant_id, .. } => tenant_id,
+        }
+    }
+
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            DomainEvent::SignalReceived { .. } => "SignalReceived",
+            DomainEvent::IngressCreated { .. } => "IngressCreated",
+            DomainEvent::SignalClassified { .. } => "SignalClassified",
+            DomainEvent::WorkCreated { .. } => "WorkCreated",
+            DomainEvent::WorkRouted { .. } => "WorkRouted",
+            DomainEvent::ActionExecuted { .. } => "ActionExecuted",
+            DomainEvent::VaultKeyUpdated { .. } => "VaultKeyUpdated",
+        }
+    }
+}
