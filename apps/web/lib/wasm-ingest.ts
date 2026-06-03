@@ -94,7 +94,7 @@ export async function ingestSignalWithWasm(input: IngestInput) {
   const inboxExternalId = crypto.randomUUID();
   const workExternalId = crypto.randomUUID();
   const client = convexClient();
-  const mutation = client.mutation as unknown as (
+  const mutation = client.mutation.bind(client) as (
     name: string,
     args: Record<string, unknown>,
   ) => Promise<unknown>;
