@@ -11,10 +11,20 @@ fn runtime_capability_matrix_covers_required_runtime_capabilities() {
         "Work Creation",
         "Action Execution",
         "Communication Runtime",
+        "OperationalKnowledgeRuntime",
+        "OperationalKnowledgeProjection",
+        "OperationalKnowledgeVisualization",
         "Simulation Runtime",
         "Process Graph Generation",
         "Behavior Analytics",
         "Vault",
+        "TenantDefinitions",
+        "TenantConfiguration",
+        "CrosswalkConfiguration",
+        "OrgStructure",
+        "UserProfiles",
+        "Memberships",
+        "Preferences",
     ];
 
     for capability in required {

@@ -18,9 +18,11 @@ use uuid::Uuid;
 
 mod application;
 mod config;
+mod configuration;
 pub(crate) mod contracts;
 mod domain;
 mod infrastructure;
+mod knowledge;
 mod recommendation_engine;
 pub(crate) mod routes;
 mod runtime_flow;
@@ -29,7 +31,7 @@ use config::Config;
 use routes::app_config;
 
 const SERVICE_NAME: &str = "rust-api";
-const CONTRACT_VERSION: &str = "pr35";
+const CONTRACT_VERSION: &str = "pr36";
 const ROUTER_ACTIVE_MARKER: &str = "router=app_config::ACTIVE";
 
 fn runtime_mode(convex_config: &ConvexConfig) -> &'static str {
@@ -4876,11 +4878,11 @@ async fn status(data: web::Data<AppState>) -> impl Responder {
 async fn validate_system() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "ok": true,
-        "runtime": "healthy",
-        "contracts": "passing",
-        "ownership": "passing",
-        "routes": "passing",
-        "capabilities": "passing",
+        "runtime": true,
+        "ownership": true,
+        "projection_boundaries": true,
+        "knowledge_runtime": true,
+        "communication_runtime": true,
         "violations": []
     }))
 }
@@ -5060,7 +5062,7 @@ mod tests {
         assert_eq!(response["service"], "rust-api");
         assert_eq!(response["data"]["status"], "healthy");
         assert_eq!(response["meta"]["mode"], "standalone");
-        assert_eq!(response["meta"]["version"], "pr35");
+        assert_eq!(response["meta"]["version"], "pr36");
     }
 
     #[actix_web::test]

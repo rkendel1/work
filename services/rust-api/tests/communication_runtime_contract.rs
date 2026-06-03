@@ -1,9 +1,14 @@
+#[path = "../src/contracts/capability_matrix.rs"]
+mod capability_matrix;
 #[path = "../src/domain/events.rs"]
 mod events;
+
+use capability_matrix::RuntimeOwner;
 
 #[test]
 fn communication_runtime_domain_events_are_declared() {
     use events::DomainEvent;
+
     let declared = [
         DomainEvent::MessageCreated {
             tenant_id: "tenant".into(),
@@ -36,6 +41,32 @@ fn communication_runtime_domain_events_are_declared() {
             "DeliveryRecorded"
         ]
     );
+}
+
+#[test]
+fn communication_runtime_ownership_is_explicit() {
+    for capability in [
+        "Message Creation",
+        "Recipient Resolution",
+        "Notification Generation",
+        "Delivery Tracking",
+        "Communication Policies",
+        "Escalation Rules",
+    ] {
+        assert_eq!(
+            capability_matrix::owner_for(capability),
+            Some(RuntimeOwner::Rust),
+            "Rust must own capability: {capability}"
+        );
+    }
+
+    for capability in ["Message Views", "Inbox Queries", "Notification Read Models"] {
+        assert_eq!(
+            capability_matrix::owner_for(capability),
+            Some(RuntimeOwner::Convex),
+            "Convex must own capability: {capability}"
+        );
+    }
 }
 
 #[test]
