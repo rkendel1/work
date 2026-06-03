@@ -149,6 +149,27 @@ export default defineSchema({
   })
     .index("by_work_item_completed_at", ["workItemId", "completedAt"])
     .index("by_tenant_completed_at", ["tenantId", "completedAt"]),
+  action_executions: defineTable({
+    tenantId: v.string(),
+    workItemId: v.id("work_items"),
+    actionId: v.id("actions"),
+    status: v.string(),
+    provider: v.string(),
+    externalRef: v.optional(v.string()),
+    payload: v.any(),
+    executedAt: v.optional(v.number()),
+  })
+    .index("by_work_item", ["workItemId"])
+    .index("by_tenant", ["tenantId"]),
+  tenant_secrets: defineTable({
+    tenantId: v.string(),
+    keyName: v.string(),
+    encryptedValue: v.string(),
+    provider: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_provider", ["tenantId", "provider"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),

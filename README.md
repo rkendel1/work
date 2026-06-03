@@ -46,6 +46,12 @@ Convex operational state
 - `GET /work/routing-preview`
 - `POST /work/{id}/selection`
 - `POST /work/{id}/outcome`
+- `POST /actions/execute`
+- `GET /executions`
+- `GET /executions/{id}`
+- `GET /vault/keys`
+- `POST /vault/keys`
+- `DELETE /vault/keys`
 - `GET /org/units`
 - `POST /org/units`
 
@@ -59,6 +65,8 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `work_items`
 - `action_selections`
 - `work_outcomes`
+- `action_executions`
+- `tenant_secrets`
 - `actions`
 - `org_units`
 - `users`
@@ -112,6 +120,7 @@ For Rust ingress (`services/ingress-engine` environment):
 
 - `CONVEX_DEPLOYMENT_URL` (e.g. `https://<deployment>.convex.cloud`)
 - `CONVEX_ADMIN_KEY`
+- `VAULT_ENCRYPTION_KEY` (optional base64-encoded 32-byte key for tenant secret encryption)
 
 Yes — that’s the cleanest version of the thesis so far, and it’s actually the first one that feels sharp enough to build toward without drifting into generic “AI ops tool” territory.
 

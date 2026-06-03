@@ -1,5 +1,9 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use recommendation_engine::{
     ActionType, ClassificationResult, Entity as ClassificationEntity, RecommendationGenerator,
     RecommendedAction, RuleBasedRecommendationEngine,
@@ -193,6 +197,35 @@ struct ActionDefinition {
     assigned_org_unit_id: Uuid,
     default_owner_role: Option<String>,
     active: bool,
+    execution_provider: String,
+}
+
+fn default_execution_provider() -> String {
+    "internal".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantSecret {
+    id: Uuid,
+    tenant_id: String,
+    key_name: String,
+    encrypted_value: String,
+    provider: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActionExecution {
+    id: Uuid,
+    tenant_id: String,
+    work_item_id: Uuid,
+    action_id: Uuid,
+    status: String,
+    provider: String,
+    external_ref: Option<String>,
+    payload: Value,
+    message: Option<String>,
+    executed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +277,7 @@ struct CreateActionRequest {
     assigned_org_unit_id: Option<Uuid>,
     default_owner_role: Option<String>,
     active: Option<bool>,
+    execution_provider: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,6 +327,71 @@ struct RecordWorkOutcomeRequest {
     completed_at: Option<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertTenantSecretRequest {
+    tenant_id: Option<String>,
+    key_name: String,
+    value: String,
+    provider: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteTenantSecretQuery {
+    tenant_id: Option<String>,
+    key_name: Option<String>,
+    provider: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantSecretSummary {
+    id: Uuid,
+    tenant_id: String,
+    key_name: String,
+    provider: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteActionRequest {
+    tenant_id: Option<String>,
+    work_item_id: Uuid,
+    action_id: Option<Uuid>,
+    action_name: Option<String>,
+    provider: Option<String>,
+    payload: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionListQuery {
+    tenant_id: Option<String>,
+    work_item_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionResult {
+    status: String,
+    external_ref: Option<String>,
+    message: Option<String>,
+}
+
+trait ActionExecutor {
+    fn execute(
+        &self,
+        action: &ActionDefinition,
+        work: &WorkItem,
+        payload: &Value,
+        secrets: &HashMap<String, String>,
+    ) -> ExecutionResult;
+}
+
+struct DirectExecutor;
+struct NangoExecutor;
+
 struct State {
     signal_events: Vec<SignalEvent>,
     inbox_items: Vec<InboxItem>,
@@ -304,6 +403,8 @@ struct State {
     classifications: Vec<ClassificationDefinition>,
     action_selections: Vec<ActionSelection>,
     work_outcomes: Vec<WorkOutcome>,
+    action_executions: Vec<ActionExecution>,
+    tenant_secrets: Vec<TenantSecret>,
 }
 
 const DEFAULT_TENANT_ID: &str = "default";
@@ -335,6 +436,8 @@ impl Default for State {
             classifications,
             action_selections: Vec::new(),
             work_outcomes: Vec::new(),
+            action_executions: Vec::new(),
+            tenant_secrets: Vec::new(),
         }
     }
 }
@@ -349,6 +452,7 @@ struct AppState {
     state: Mutex<State>,
     convex_config: ConvexConfig,
     client: Client,
+    vault_crypto: VaultCrypto,
 }
 
 impl AppState {
@@ -357,6 +461,124 @@ impl AppState {
             state: Mutex::new(State::default()),
             convex_config,
             client: Client::new(),
+            vault_crypto: VaultCrypto::from_env(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VaultCrypto {
+    key: [u8; 32],
+}
+
+impl VaultCrypto {
+    fn from_env() -> Self {
+        if let Ok(raw_value) = std::env::var("VAULT_ENCRYPTION_KEY") {
+            if let Ok(decoded) = BASE64_STANDARD.decode(raw_value.as_bytes())
+                && decoded.len() == 32
+            {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&decoded);
+                return Self { key };
+            }
+        }
+
+        let mut key = [0u8; 32];
+        rand::rng().fill(&mut key);
+        Self { key }
+    }
+
+    fn encrypt(&self, value: &str) -> Option<String> {
+        let cipher = Aes256Gcm::new_from_slice(&self.key).ok()?;
+        let mut nonce_bytes = [0u8; 12];
+        rand::rng().fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, value.as_bytes()).ok()?;
+        let mut combined = nonce_bytes.to_vec();
+        combined.extend_from_slice(&ciphertext);
+        Some(BASE64_STANDARD.encode(combined))
+    }
+
+    fn decrypt(&self, encrypted_value: &str) -> Option<String> {
+        let decoded = BASE64_STANDARD.decode(encrypted_value.as_bytes()).ok()?;
+        if decoded.len() <= 12 {
+            return None;
+        }
+        let (nonce_bytes, ciphertext) = decoded.split_at(12);
+        let cipher = Aes256Gcm::new_from_slice(&self.key).ok()?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher.decrypt(nonce, ciphertext).ok()?;
+        String::from_utf8(plaintext).ok()
+    }
+}
+
+impl ActionExecutor for DirectExecutor {
+    fn execute(
+        &self,
+        action: &ActionDefinition,
+        work: &WorkItem,
+        payload: &Value,
+        secrets: &HashMap<String, String>,
+    ) -> ExecutionResult {
+        let provider = action.execution_provider.as_str();
+        let required_secret = match provider {
+            "slack" => Some("slack_bot_token"),
+            "jira" => Some("jira_api_key"),
+            "email" => Some("smtp_password"),
+            "webhook" => Some("webhook_signing_secret"),
+            _ => None,
+        };
+
+        if let Some(secret_name) = required_secret
+            && !secrets.contains_key(secret_name)
+        {
+            return ExecutionResult {
+                status: "failed".to_string(),
+                external_ref: None,
+                message: Some(format!("missing required secret `{secret_name}`")),
+            };
+        }
+
+        let default_message = format!("Executed {} for work {}", action.name, work.id);
+        let message = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(default_message);
+
+        ExecutionResult {
+            status: "success".to_string(),
+            external_ref: Some(format!("{provider}-{}", Uuid::new_v4())),
+            message: Some(message),
+        }
+    }
+}
+
+impl ActionExecutor for NangoExecutor {
+    fn execute(
+        &self,
+        action: &ActionDefinition,
+        work: &WorkItem,
+        payload: &Value,
+        secrets: &HashMap<String, String>,
+    ) -> ExecutionResult {
+        if !secrets.contains_key("nango_connection_id") {
+            return ExecutionResult {
+                status: "failed".to_string(),
+                external_ref: None,
+                message: Some("missing required secret `nango_connection_id`".to_string()),
+            };
+        }
+
+        let summary = payload
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("Nango execution completed");
+
+        ExecutionResult {
+            status: "success".to_string(),
+            external_ref: Some(format!("nango-{}", Uuid::new_v4())),
+            message: Some(format!("{summary}: {} for {}", action.name, work.id)),
         }
     }
 }
@@ -478,6 +700,28 @@ fn is_valid_outcome_status(status: &str) -> bool {
 
 fn is_valid_feedback(feedback: &str) -> bool {
     matches!(feedback, "correct" | "wrong" | "partial" | "escalated")
+}
+
+fn is_valid_execution_status(status: &str) -> bool {
+    matches!(status, "pending" | "running" | "success" | "failed")
+}
+
+fn tenant_secret_summary(secret: &TenantSecret) -> TenantSecretSummary {
+    TenantSecretSummary {
+        id: secret.id,
+        tenant_id: secret.tenant_id.clone(),
+        key_name: secret.key_name.clone(),
+        provider: secret.provider.clone(),
+        created_at: secret.created_at.timestamp(),
+    }
+}
+
+fn executor_for_provider(provider: &str) -> Box<dyn ActionExecutor + Send + Sync> {
+    if provider.eq_ignore_ascii_case("nango") {
+        Box::new(NangoExecutor)
+    } else {
+        Box::new(DirectExecutor)
+    }
 }
 
 fn load_pack(vertical: &str, industry: &str) -> OperationalPack {
@@ -645,7 +889,9 @@ fn load_pack(vertical: &str, industry: &str) -> OperationalPack {
     }
 }
 
-fn pack_org_unit_templates(pack: &OperationalPack) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+fn pack_org_unit_templates(
+    pack: &OperationalPack,
+) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
     if pack.vertical == "Property Management" && pack.industry == "Commercial Real Estate" {
         return vec![
             ("Operations", "department", None),
@@ -667,7 +913,10 @@ fn pack_org_unit_templates(pack: &OperationalPack) -> Vec<(&'static str, &'stati
         ];
     }
 
-    vec![("Operations", "department", None), ("General Team", "team", Some("Operations"))]
+    vec![
+        ("Operations", "department", None),
+        ("General Team", "team", Some("Operations")),
+    ]
 }
 
 fn pack_action_org_unit_name(pack: &OperationalPack, action_name: &str) -> &'static str {
@@ -723,7 +972,12 @@ fn tenant_primary_org_unit_id(state: &State, tenant_id: &str) -> Option<Uuid> {
         .org_units
         .iter()
         .find(|unit| unit.tenant_id == tenant_id && unit.parent_id.is_none())
-        .or_else(|| state.org_units.iter().find(|unit| unit.tenant_id == tenant_id))
+        .or_else(|| {
+            state
+                .org_units
+                .iter()
+                .find(|unit| unit.tenant_id == tenant_id)
+        })
         .map(|unit| unit.id)
 }
 
@@ -745,7 +999,11 @@ fn ensure_default_org_unit(state: &mut State, tenant_id: &str) -> Uuid {
     org_unit_id
 }
 
-fn actions_from_pack(tenant_id: &str, pack: &OperationalPack, org_units: &[OrgUnit]) -> Vec<ActionDefinition> {
+fn actions_from_pack(
+    tenant_id: &str,
+    pack: &OperationalPack,
+    org_units: &[OrgUnit],
+) -> Vec<ActionDefinition> {
     let fallback_org_unit_id = org_units
         .iter()
         .find(|unit| unit.parent_id.is_none())
@@ -773,6 +1031,7 @@ fn actions_from_pack(tenant_id: &str, pack: &OperationalPack, org_units: &[OrgUn
                 .unwrap_or(fallback_org_unit_id),
             default_owner_role: None,
             active: true,
+            execution_provider: default_execution_provider(),
         })
         .collect()
 }
@@ -889,13 +1148,18 @@ fn route_work_item(
         state
             .actions
             .iter()
-            .find(|action| action.tenant_id == tenant_id && action.active && action.name == action_name)
+            .find(|action| {
+                action.tenant_id == tenant_id && action.active && action.name == action_name
+            })
             .map(|action| action.assigned_org_unit_id)
     };
 
     for recommendation in recommendations {
         if let Some(assigned_org_unit_id) = route_from_state_action(state, &recommendation.title) {
-            return (assigned_org_unit_id, build_routing_path(state, assigned_org_unit_id));
+            return (
+                assigned_org_unit_id,
+                build_routing_path(state, assigned_org_unit_id),
+            );
         }
     }
 
@@ -912,11 +1176,17 @@ fn route_work_item(
         })
         .map(|action| action.assigned_org_unit_id)
     {
-        return (assigned_org_unit_id, build_routing_path(state, assigned_org_unit_id));
+        return (
+            assigned_org_unit_id,
+            build_routing_path(state, assigned_org_unit_id),
+        );
     }
 
     let fallback_org_unit_id = ensure_default_org_unit(state, tenant_id);
-    (fallback_org_unit_id, build_routing_path(state, fallback_org_unit_id))
+    (
+        fallback_org_unit_id,
+        build_routing_path(state, fallback_org_unit_id),
+    )
 }
 
 fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
@@ -1365,12 +1635,11 @@ async fn forward_work_to_convex(
             status: work_item.status.clone(),
             assigned_org_unit_external_id: work_item.assigned_org_unit_id.to_string(),
             current_owner_id: work_item.current_owner_id.clone(),
-            routing_path_external_ids: work_item
-                .routing_path
-                .iter()
-                .map(Uuid::to_string)
-                .collect(),
-            routing_action_name: work_item.recommended_actions.first().map(|action| action.title.clone()),
+            routing_path_external_ids: work_item.routing_path.iter().map(Uuid::to_string).collect(),
+            routing_action_name: work_item
+                .recommended_actions
+                .first()
+                .map(|action| action.title.clone()),
             recommended_actions: work_item
                 .recommended_actions
                 .iter()
@@ -1465,7 +1734,9 @@ async fn forward_work_outcome_to_convex(
             status: outcome.status.clone(),
             resolution_notes: outcome.resolution_notes.clone(),
             feedback: outcome.feedback.clone(),
-            completed_at: outcome.completed_at.map(|completed_at| completed_at.timestamp()),
+            completed_at: outcome
+                .completed_at
+                .map(|completed_at| completed_at.timestamp()),
         },
     )
     .await
@@ -1541,7 +1812,8 @@ async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) ->
         (signal_event, item, received_event)
     };
 
-    if let Err(error) = forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+    if let Err(error) =
+        forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
     {
         eprintln!("failed to forward signal event to convex: {error}");
     }
@@ -1578,7 +1850,8 @@ async fn ingest_signal(
     let normalized_content =
         normalize_signal_content(&raw_payload, request.normalized_content.as_deref());
     if normalized_content.trim().is_empty() {
-        return HttpResponse::BadRequest().body("normalizedContent or rawPayload with text is required");
+        return HttpResponse::BadRequest()
+            .body("normalizedContent or rawPayload with text is required");
     }
     let metadata_timestamp = request
         .metadata
@@ -1586,9 +1859,15 @@ async fn ingest_signal(
         .and_then(|metadata| metadata.timestamp)
         .unwrap_or_else(|| Utc::now().timestamp());
     let metadata = SignalMetadata {
-        sender: request.metadata.as_ref().and_then(|metadata| metadata.sender.clone()),
+        sender: request
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.sender.clone()),
         timestamp: metadata_timestamp,
-        channel: request.metadata.as_ref().and_then(|metadata| metadata.channel.clone()),
+        channel: request
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.channel.clone()),
     };
 
     let (signal_event, inbox_item, received_event) = {
@@ -1613,17 +1892,24 @@ async fn ingest_signal(
         (signal_event, inbox_item, received_event)
     };
 
-    if let Err(error) = forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+    if let Err(error) =
+        forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
     {
         eprintln!("failed to forward signal event to convex: {error}");
     }
-    if let Err(error) = forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await {
+    if let Err(error) =
+        forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await
+    {
         eprintln!("failed to forward inbox item to convex: {error}");
     }
     if let Some(event) = received_event {
-        if let Err(error) =
-            forward_ingress_event_to_convex(&data.client, &data.convex_config, inbox_item.id, &event)
-                .await
+        if let Err(error) = forward_ingress_event_to_convex(
+            &data.client,
+            &data.convex_config,
+            inbox_item.id,
+            &event,
+        )
+        .await
         {
             eprintln!("failed to forward ingress event to convex: {error}");
         }
@@ -1739,7 +2025,14 @@ async fn postmark_inbound(
         .and_then(|from_full| from_full.email.clone())
         .or_else(|| payload.from.clone());
 
-    let (signal_event, inbox_item, work_item, status_updates, received_event, recommendations_event) = {
+    let (
+        signal_event,
+        inbox_item,
+        work_item,
+        status_updates,
+        received_event,
+        recommendations_event,
+    ) = {
         let mut state = lock_state(&data);
         let tenant_id = DEFAULT_TENANT_ID.to_string();
         ensure_tenant_exists(&mut state, &tenant_id);
@@ -1887,7 +2180,9 @@ async fn create_tenant(
     let org_units = org_units_from_pack(&id, &pack);
     state.tenants.push(tenant.clone());
     state.org_units.extend(org_units.clone());
-    state.actions.extend(actions_from_pack(&id, &pack, &org_units));
+    state
+        .actions
+        .extend(actions_from_pack(&id, &pack, &org_units));
     state
         .classifications
         .extend(classifications_from_pack(&id, &pack));
@@ -1966,19 +2261,18 @@ async fn create_action(
     let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
     let mut state = lock_state(&data);
     ensure_tenant_exists(&mut state, &tenant_id);
-    let assigned_org_unit_id = if let Some(assigned_org_unit_id) = request.assigned_org_unit_id {
-        if state
-            .org_units
-            .iter()
-            .any(|org_unit| org_unit.id == assigned_org_unit_id && org_unit.tenant_id == tenant_id)
-        {
-            assigned_org_unit_id
+    let assigned_org_unit_id =
+        if let Some(assigned_org_unit_id) = request.assigned_org_unit_id {
+            if state.org_units.iter().any(|org_unit| {
+                org_unit.id == assigned_org_unit_id && org_unit.tenant_id == tenant_id
+            }) {
+                assigned_org_unit_id
+            } else {
+                return HttpResponse::BadRequest().body("assignedOrgUnitId is invalid for tenant");
+            }
         } else {
-            return HttpResponse::BadRequest().body("assignedOrgUnitId is invalid for tenant");
-        }
-    } else {
-        ensure_default_org_unit(&mut state, &tenant_id)
-    };
+            ensure_default_org_unit(&mut state, &tenant_id)
+        };
 
     let action = ActionDefinition {
         id: Uuid::new_v4(),
@@ -2000,6 +2294,13 @@ async fn create_action(
             .filter(|value| !value.is_empty())
             .map(str::to_string),
         active: request.active.unwrap_or(true),
+        execution_provider: request
+            .execution_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("internal")
+            .to_lowercase(),
     };
 
     if action.classification_types.is_empty() {
@@ -2064,6 +2365,247 @@ async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>)
     HttpResponse::Ok().json(actions)
 }
 
+async fn upsert_vault_key(
+    data: web::Data<AppState>,
+    request: web::Json<UpsertTenantSecretRequest>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let key_name = request.key_name.trim().to_lowercase();
+    let provider = request.provider.trim().to_lowercase();
+    let value = request.value.trim();
+    if key_name.is_empty() || provider.is_empty() || value.is_empty() {
+        return HttpResponse::BadRequest().body("keyName, provider, and value are required");
+    }
+
+    let Some(encrypted_value) = data.vault_crypto.encrypt(value) else {
+        return HttpResponse::InternalServerError().body("failed to encrypt secret");
+    };
+
+    let mut state = lock_state(&data);
+    if let Some(existing) = state.tenant_secrets.iter_mut().find(|secret| {
+        secret.tenant_id == tenant_id && secret.key_name == key_name && secret.provider == provider
+    }) {
+        existing.encrypted_value = encrypted_value;
+        existing.created_at = Utc::now();
+        return HttpResponse::Created().json(tenant_secret_summary(existing));
+    }
+
+    let secret = TenantSecret {
+        id: Uuid::new_v4(),
+        tenant_id,
+        key_name,
+        encrypted_value,
+        provider,
+        created_at: Utc::now(),
+    };
+    let summary = tenant_secret_summary(&secret);
+    state.tenant_secrets.push(secret);
+    HttpResponse::Created().json(summary)
+}
+
+async fn list_vault_keys(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let keys: Vec<TenantSecretSummary> = state
+        .tenant_secrets
+        .iter()
+        .filter(|secret| secret.tenant_id == tenant_id)
+        .map(tenant_secret_summary)
+        .collect();
+    HttpResponse::Ok().json(keys)
+}
+
+async fn delete_vault_key(
+    data: web::Data<AppState>,
+    query: web::Query<DeleteTenantSecretQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let Some(key_name) = query
+        .key_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase)
+    else {
+        return HttpResponse::BadRequest().body("keyName is required");
+    };
+    let provider = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+
+    let mut state = lock_state(&data);
+    let before = state.tenant_secrets.len();
+    state.tenant_secrets.retain(|secret| {
+        if secret.tenant_id != tenant_id || secret.key_name != key_name {
+            return true;
+        }
+        if let Some(provider) = provider.as_deref() {
+            return secret.provider != provider;
+        }
+        false
+    });
+
+    if before == state.tenant_secrets.len() {
+        return HttpResponse::NotFound().body("secret not found");
+    }
+
+    HttpResponse::NoContent().finish()
+}
+
+async fn execute_action(
+    data: web::Data<AppState>,
+    request: web::Json<ExecuteActionRequest>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let payload = request
+        .payload
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let (execution_id, action, work_item, provider, secrets) = {
+        let mut state = lock_state(&data);
+
+        let Some(work_item) = state
+            .work_items
+            .iter()
+            .find(|work_item| {
+                work_item.id == request.work_item_id && work_item.tenant_id == tenant_id
+            })
+            .cloned()
+        else {
+            return HttpResponse::NotFound().body("work item not found");
+        };
+
+        let action = if let Some(action_id) = request.action_id {
+            state
+                .actions
+                .iter()
+                .find(|action| action.id == action_id && action.tenant_id == tenant_id)
+                .cloned()
+        } else if let Some(action_name) = request
+            .action_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            state
+                .actions
+                .iter()
+                .find(|action| {
+                    action.tenant_id == tenant_id && action.name.eq_ignore_ascii_case(action_name)
+                })
+                .cloned()
+        } else {
+            None
+        };
+
+        let Some(action) = action else {
+            return HttpResponse::BadRequest().body("actionId or actionName is required");
+        };
+
+        let provider = request
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&action.execution_provider)
+            .to_lowercase();
+
+        let execution_id = Uuid::new_v4();
+        state.action_executions.push(ActionExecution {
+            id: execution_id,
+            tenant_id: tenant_id.clone(),
+            work_item_id: work_item.id,
+            action_id: action.id,
+            status: "running".to_string(),
+            provider: provider.clone(),
+            external_ref: None,
+            payload: payload.clone(),
+            message: None,
+            executed_at: None,
+        });
+
+        let secrets: HashMap<String, String> = state
+            .tenant_secrets
+            .iter()
+            .filter(|secret| secret.tenant_id == tenant_id && secret.provider == provider)
+            .filter_map(|secret| {
+                data.vault_crypto
+                    .decrypt(&secret.encrypted_value)
+                    .map(|value| (secret.key_name.clone(), value))
+            })
+            .collect();
+
+        (execution_id, action, work_item, provider, secrets)
+    };
+
+    let executor = executor_for_provider(&provider);
+    let result = executor.execute(&action, &work_item, &payload, &secrets);
+    if !is_valid_execution_status(&result.status) {
+        return HttpResponse::InternalServerError().body("invalid execution status");
+    }
+
+    let mut state = lock_state(&data);
+    if let Some(execution) = state
+        .action_executions
+        .iter_mut()
+        .find(|execution| execution.id == execution_id && execution.tenant_id == tenant_id)
+    {
+        execution.status = result.status;
+        execution.external_ref = result.external_ref;
+        execution.message = result.message;
+        execution.executed_at = Some(Utc::now());
+        return HttpResponse::Created().json(execution.clone());
+    }
+
+    HttpResponse::NotFound().body("execution not found")
+}
+
+async fn list_executions(
+    data: web::Data<AppState>,
+    query: web::Query<ExecutionListQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let executions: Vec<ActionExecution> = state
+        .action_executions
+        .iter()
+        .filter(|execution| execution.tenant_id == tenant_id)
+        .filter(|execution| {
+            if let Some(work_item_id) = query.work_item_id {
+                execution.work_item_id == work_item_id
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(executions)
+}
+
+async fn get_execution(
+    data: web::Data<AppState>,
+    execution_id: web::Path<Uuid>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let Some(execution) = state
+        .action_executions
+        .iter()
+        .find(|execution| execution.id == *execution_id && execution.tenant_id == tenant_id)
+    else {
+        return HttpResponse::NotFound().body("execution not found");
+    };
+    HttpResponse::Ok().json(execution)
+}
+
 async fn list_items(
     data: web::Data<AppState>,
     query: web::Query<TenantScopedQuery>,
@@ -2116,7 +2658,9 @@ async fn work_routing_preview(
     let state = lock_state(&data);
     let selected_action = if let Some(action_name) = action_name.as_deref() {
         state.actions.iter().find(|action| {
-            action.tenant_id == tenant_id && action.active && action.name.eq_ignore_ascii_case(action_name)
+            action.tenant_id == tenant_id
+                && action.active
+                && action.name.eq_ignore_ascii_case(action_name)
         })
     } else {
         state.actions.iter().find(|action| {
@@ -2214,7 +2758,8 @@ async fn select_work_action(
         (selection, ingress_event, ingress_id)
     };
 
-    if let Err(error) = forward_action_selection_to_convex(&data.client, &data.convex_config, &selection).await
+    if let Err(error) =
+        forward_action_selection_to_convex(&data.client, &data.convex_config, &selection).await
     {
         eprintln!("failed to forward action selection to convex: {error}");
     }
@@ -2303,13 +2848,19 @@ async fn record_work_outcome(
         (outcome, close_event, ingress_id)
     };
 
-    if let Err(error) = forward_work_outcome_to_convex(&data.client, &data.convex_config, &outcome).await {
+    if let Err(error) =
+        forward_work_outcome_to_convex(&data.client, &data.convex_config, &outcome).await
+    {
         eprintln!("failed to forward work outcome to convex: {error}");
     }
     if let Some(close_event) = close_event
-        && let Err(error) =
-            forward_status_update_to_convex(&data.client, &data.convex_config, ingress_id, &close_event)
-                .await
+        && let Err(error) = forward_status_update_to_convex(
+            &data.client,
+            &data.convex_config,
+            ingress_id,
+            &close_event,
+        )
+        .await
     {
         eprintln!("failed to forward closed status update to convex: {error}");
     }
@@ -2347,6 +2898,12 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/org/units", web::post().to(create_org_unit))
         .route("/actions", web::get().to(list_actions))
         .route("/actions", web::post().to(create_action))
+        .route("/actions/execute", web::post().to(execute_action))
+        .route("/executions", web::get().to(list_executions))
+        .route("/executions/{id}", web::get().to(get_execution))
+        .route("/vault/keys", web::get().to(list_vault_keys))
+        .route("/vault/keys", web::post().to(upsert_vault_key))
+        .route("/vault/keys", web::delete().to(delete_vault_key))
         .route("/items", web::get().to(list_items))
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
@@ -2747,7 +3304,8 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|action| action.name == "Dispatch Maintenance Vendor" && action.assigned_org_unit_id != Uuid::nil())
+                .any(|action| action.name == "Dispatch Maintenance Vendor"
+                    && action.assigned_org_unit_id != Uuid::nil())
         );
     }
 
@@ -2810,5 +3368,121 @@ mod tests {
         assert_eq!(preview.classification_type, "maintenance_request");
         assert!(preview.assigned_org_unit.is_some());
         assert!(!preview.routing_path.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn vault_keys_are_tenant_scoped_and_not_exposed_in_plaintext() {
+        let app_state = test_state();
+        let app =
+            test::init_service(App::new().app_data(app_state.clone()).configure(app_config)).await;
+
+        let create_secret_req = test::TestRequest::post()
+            .uri("/vault/keys")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "provider": "slack",
+                "keyName": "slack_bot_token",
+                "value": "xoxb-secret"
+            }))
+            .to_request();
+        let summary: TenantSecretSummary =
+            test::call_and_read_body_json(&app, create_secret_req).await;
+        assert_eq!(summary.tenant_id, "acme");
+        assert_eq!(summary.key_name, "slack_bot_token");
+
+        let list_req = test::TestRequest::get()
+            .uri("/vault/keys?tenantId=acme")
+            .to_request();
+        let keys: Vec<TenantSecretSummary> = test::call_and_read_body_json(&app, list_req).await;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].provider, "slack");
+
+        let other_tenant_req = test::TestRequest::get()
+            .uri("/vault/keys?tenantId=other")
+            .to_request();
+        let other_keys: Vec<TenantSecretSummary> =
+            test::call_and_read_body_json(&app, other_tenant_req).await;
+        assert!(other_keys.is_empty());
+
+        let state = lock_state(&app_state);
+        let stored = state
+            .tenant_secrets
+            .iter()
+            .find(|secret| secret.tenant_id == "acme")
+            .expect("secret should be stored");
+        assert_ne!(stored.encrypted_value, "xoxb-secret");
+    }
+
+    #[actix_web::test]
+    async fn execute_action_uses_tenant_vault_credentials_and_tracks_execution() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_action_req = test::TestRequest::post()
+            .uri("/actions")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "name": "Notify Maintenance Team",
+                "description": "Send Slack alert",
+                "category": "notification",
+                "classificationTypes": ["maintenance_request"],
+                "executionProvider": "slack",
+                "active": true
+            }))
+            .to_request();
+        let action: ActionDefinition = test::call_and_read_body_json(&app, create_action_req).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in Room A",
+                "tenantId": "acme"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let create_secret_req = test::TestRequest::post()
+            .uri("/vault/keys")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "provider": "slack",
+                "keyName": "slack_bot_token",
+                "value": "xoxb-secret"
+            }))
+            .to_request();
+        let _: TenantSecretSummary = test::call_and_read_body_json(&app, create_secret_req).await;
+
+        let execute_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "workItemId": work_item.id,
+                "actionId": action.id,
+                "payload": {
+                    "channel": "#maintenance",
+                    "message": "HVAC issue in Room A"
+                }
+            }))
+            .to_request();
+        let execution: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+        assert_eq!(execution.tenant_id, "acme");
+        assert_eq!(execution.provider, "slack");
+        assert_eq!(execution.status, "success");
+        assert!(execution.executed_at.is_some());
+
+        let execution_lookup_req = test::TestRequest::get()
+            .uri(&format!("/executions/{}?tenantId=acme", execution.id))
+            .to_request();
+        let fetched: ActionExecution =
+            test::call_and_read_body_json(&app, execution_lookup_req).await;
+        assert_eq!(fetched.id, execution.id);
     }
 }
