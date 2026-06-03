@@ -5,10 +5,12 @@ export default defineSchema({
   signal_events: defineTable({
     tenantId: v.string(),
     sourceType: v.string(),
-    provenance: v.object({
-      origin: v.string(),
-      generatedBy: v.string(),
-    }),
+    provenance: v.optional(
+      v.object({
+        origin: v.string(),
+        generatedBy: v.string(),
+      }),
+    ),
     rawPayload: v.any(),
     normalizedContent: v.string(),
     metadata: v.object({
