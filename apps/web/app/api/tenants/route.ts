@@ -14,8 +14,8 @@ const DEFAULT_SIMULATION_TENANTS = [
   },
   {
     id: "northstar_facilities",
-    slug: "northstar_facilities",
-    domain: "northstar_facilities.canonflo.com",
+    slug: "northstar-facilities",
+    domain: "northstar-facilities.canonflo.com",
     name: "Northstar Facilities",
     display_name: "Northstar Facilities",
     vertical: "Property Management",
@@ -24,8 +24,8 @@ const DEFAULT_SIMULATION_TENANTS = [
   },
   {
     id: "harbor_clinic_ops",
-    slug: "harbor_clinic_ops",
-    domain: "harbor_clinic_ops.canonflo.com",
+    slug: "harbor-clinic-ops",
+    domain: "harbor-clinic-ops.canonflo.com",
     name: "Harbor Clinic Ops",
     display_name: "Harbor Clinic Ops",
     vertical: "Healthcare",
