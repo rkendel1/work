@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { isRootHost } from "@/lib/tenant-routing";
 import { OnboardingClient } from "@/app/onboarding/onboarding-client";
+import { runConvexAdminMutation } from "@/lib/convex-admin";
 
 export default async function OnboardingPage() {
   const headerStore = await headers();
@@ -28,8 +29,20 @@ export default async function OnboardingPage() {
     }
     const user = await currentUser();
     const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
+    const email = user?.primaryEmailAddress?.emailAddress;
+    if (email) {
+      try {
+        await runConvexAdminMutation("actions:upsertUserByEmail", {
+          email,
+          name: fullName || user?.username || undefined,
+          handle: user?.username ?? undefined,
+        });
+      } catch (error) {
+        console.error("Failed to sync Clerk user to Convex", error);
+      }
+    }
     userIdentifier =
-      user?.primaryEmailAddress?.emailAddress ??
+      email ??
       (fullName || null) ??
       user?.username ??
       userId;
