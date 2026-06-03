@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
-mod config;
 mod application;
+mod config;
 mod domain;
 mod infrastructure;
 mod recommendation_engine;
@@ -3168,6 +3168,11 @@ async fn upsert_vault_key(
     }) {
         existing.encrypted_value = encrypted_value;
         existing.created_at = Utc::now();
+        data.event_bus
+            .publish(domain::events::DomainEvent::VaultKeyUpdated {
+                tenant_id: existing.tenant_id.clone(),
+                key_id: existing.id.to_string(),
+            });
         return HttpResponse::Created().json(tenant_secret_summary(existing));
     }
 
@@ -3180,6 +3185,11 @@ async fn upsert_vault_key(
         created_at: Utc::now(),
     };
     let summary = tenant_secret_summary(&secret);
+    data.event_bus
+        .publish(domain::events::DomainEvent::VaultKeyUpdated {
+            tenant_id: secret.tenant_id.clone(),
+            key_id: secret.id.to_string(),
+        });
     state.tenant_secrets.push(secret);
     HttpResponse::Created().json(summary)
 }
@@ -3217,6 +3227,7 @@ async fn delete_vault_key(
 
     let mut state = lock_state(&data);
     let before = state.tenant_secrets.len();
+    let mut removed_ids = Vec::new();
     state.tenant_secrets.retain(|secret| {
         if secret.tenant_id != tenant_id || secret.key_name != key_name {
             return true;
@@ -3224,11 +3235,19 @@ async fn delete_vault_key(
         if let Some(provider) = provider.as_deref() {
             return secret.provider != provider;
         }
+        removed_ids.push(secret.id);
         false
     });
 
     if before == state.tenant_secrets.len() {
         return HttpResponse::NotFound().body("secret not found");
+    }
+    for secret_id in removed_ids {
+        data.event_bus
+            .publish(domain::events::DomainEvent::VaultKeyUpdated {
+                tenant_id: tenant_id.clone(),
+                key_id: secret_id.to_string(),
+            });
     }
 
     HttpResponse::NoContent().finish()
@@ -3383,7 +3402,13 @@ async fn execute_action(
 
     let mut state = lock_state(&data);
     state.execution_results.push(execution.clone());
-    runtime_flow::emit_action_executed_event(&data.event_bus, &tenant_id, execution.id, action.id);
+    runtime_flow::emit_action_executed_event(
+        &data.event_bus,
+        &tenant_id,
+        execution.id,
+        action.id,
+        &execution.status,
+    );
     refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
     HttpResponse::Created().json(execution)
 }
@@ -4351,7 +4376,8 @@ async fn work_routing_preview(
         .filter(|value| !value.is_empty())
         .unwrap_or("");
     let routing_service = application::routing_service::RoutingService::new(data);
-    let preview = routing_service.preview(tenant_id, classification_type, action_name, signal_content);
+    let preview =
+        routing_service.preview(tenant_id, classification_type, action_name, signal_content);
     HttpResponse::Ok().json(preview)
 }
 
@@ -5462,11 +5488,20 @@ mod tests {
             .find(|secret| secret.tenant_id == "acme")
             .expect("secret should be stored");
         assert_ne!(stored.encrypted_value, "xoxb-secret");
+        drop(state);
+
+        let events = app_state.event_bus.drain();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, domain::events::DomainEvent::VaultKeyUpdated { tenant_id, .. } if tenant_id == "acme"))
+        );
     }
 
     #[actix_web::test]
     async fn execute_action_uses_tenant_vault_credentials_and_tracks_execution() {
-        let app = test::init_service(build_app(test_state())).await;
+        let app_state = test_state();
+        let app = test::init_service(build_app(app_state.clone())).await;
 
         let create_action_req = test::TestRequest::post()
             .uri("/actions")
@@ -5540,6 +5575,22 @@ mod tests {
         let fetched: ExecutionResultRecord =
             test::call_and_read_body_json(&app, execution_lookup_req).await;
         assert_eq!(fetched.id, execution.id);
+
+        let events = app_state.event_bus.drain();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                domain::events::DomainEvent::ActionExecuted {
+                    tenant_id,
+                    execution_id,
+                    action_id,
+                    result,
+                } if tenant_id == "acme"
+                    && execution_id == &execution.id.to_string()
+                    && action_id == &action.id.to_string()
+                    && result == "success"
+            )
+        }));
     }
 
     #[actix_web::test]
