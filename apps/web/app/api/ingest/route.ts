@@ -4,6 +4,7 @@ import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 type IngestPayload = {
   source?: string;
   content?: string;
+  tenantId?: string;
 };
 
 export async function POST(request: Request) {
@@ -17,6 +18,7 @@ export async function POST(request: Request) {
 
   const source = payload.source?.trim();
   const content = payload.content?.trim();
+  const tenantId = payload.tenantId?.trim();
 
   if (!source || !content) {
     return NextResponse.json(
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
   const ingestResponse = await fetch(`${RUST_INGRESS_URL}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source, content }),
+    body: JSON.stringify({ source, content, tenantId }),
   });
 
   if (!ingestResponse.ok) {
