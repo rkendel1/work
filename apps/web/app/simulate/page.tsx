@@ -2,8 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-type Tenant = { id: string; display_name: string };
+type Tenant = { id: string; display_name: string; domain?: string };
 type InjectionMode = "single" | "burst" | "scenario";
+type InjectionResult = {
+  content: string;
+  ok: boolean;
+  endpoint: string;
+};
 
 const SCENARIO_LIBRARY: Record<string, string[]> = {
   "Facilities outage day": [
@@ -27,6 +32,14 @@ const SCENARIO_LIBRARY: Record<string, string[]> = {
     "Payment reconciliation queue overflow message",
   ],
 };
+
+const BURST_VARIATIONS = [
+  "critical escalation",
+  "sensor anomaly",
+  "tenant complaint",
+  "vendor delay",
+  "ops follow-up",
+];
 
 async function postSignal(tenantId: string, content: string) {
   return await fetch("/api/signals", {
@@ -57,6 +70,7 @@ export default function SimulatePage() {
   const [scenario, setScenario] = useState("Facilities outage day");
   const [status, setStatus] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [results, setResults] = useState<InjectionResult[]>([]);
 
   useEffect(() => {
     fetch("/api/tenants")
@@ -82,27 +96,38 @@ export default function SimulatePage() {
       return [payload];
     }
     if (mode === "burst") {
-      return Array.from({ length: burstSize }, (_, index) => `${payload} #${index + 1}`);
+      return Array.from(
+        { length: burstSize },
+        (_, index) => `${payload} • ${BURST_VARIATIONS[index % BURST_VARIATIONS.length]} #${index + 1}`,
+      );
     }
     return SCENARIO_LIBRARY[scenario] ?? [];
   }, [burstSize, mode, payload, scenario]);
 
   async function runInjection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
+    const targetDomain = selectedTenant?.domain ?? window.location.host;
+    const protocol = targetDomain === "localhost" || targetDomain.endsWith(".localhost") ? "http:" : "https:";
+    const targetEndpoint = `${protocol}//${targetDomain}/api/signals`;
     setRunning(true);
-    setStatus("Running scenario injection...");
+    setResults([]);
+    setStatus(`Running scenario injection to ${targetEndpoint}...`);
     let successCount = 0;
     for (const content of payloads) {
       const response = await postSignal(tenantId, content);
       if (response.ok) {
         successCount += 1;
       }
+      setResults((previous) => [...previous, { content, ok: response.ok, endpoint: targetEndpoint }]);
       if (mode === "burst") {
         await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 100)));
       }
     }
     setRunning(false);
-    setStatus(`Scenario injection complete: ${successCount}/${payloads.length} signals processed.`);
+    setStatus(
+      `Scenario injection complete: ${successCount}/${payloads.length} signals processed via ${targetEndpoint}.`,
+    );
   }
 
   return (
@@ -197,6 +222,21 @@ export default function SimulatePage() {
       </form>
 
       {status ? <p className="text-sm text-zinc-700 dark:text-zinc-300">{status}</p> : null}
+      {results.length > 0 ? (
+        <section className="rounded-lg border bg-white p-5 dark:border-zinc-700 dark:bg-zinc-800">
+          <h2 className="text-lg font-semibold">Signals sent</h2>
+          <ul className="mt-3 space-y-2 text-sm">
+            {results.map((result, index) => (
+              <li key={`${result.content}-${index}`} className="rounded border p-2 dark:border-zinc-700">
+                <p className="font-medium">{result.content}</p>
+                <p className="text-zinc-600 dark:text-zinc-400">
+                  {result.ok ? "Delivered" : "Failed"} • {result.endpoint}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </main>
   );
 }
