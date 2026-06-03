@@ -43,6 +43,7 @@ Convex operational state
 - `GET /items`
 - `GET /items/{id}/timeline`
 - `GET /work`
+- `GET /behavioral-patterns`
 - `GET /work/routing-preview`
 - `POST /work/{id}/selection`
 - `POST /work/{id}/outcome`
@@ -68,6 +69,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `action_selections`
 - `work_outcomes`
 - `action_executions`
+- `behavioral_patterns`
 - `tenant_secrets`
 - `actions`
 - `org_units`
