@@ -18,7 +18,12 @@ export default function SignUpPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
-      <SignUp path="/sign-up" signInUrl="/sign-in" />
+      <SignUp
+        path="/sign-up"
+        signInUrl="/sign-in"
+        forceRedirectUrl="/onboarding"
+        fallbackRedirectUrl="/onboarding"
+      />
     </main>
   );
 }

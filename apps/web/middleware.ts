@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
-import { tenantSlugFromHost } from "@/lib/tenant-routing";
+import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
 
 type TenantRecord = {
   id: string;
@@ -12,7 +12,8 @@ const DEFAULT_TENANT_ID = "default";
 
 export async function middleware(request: NextRequest) {
   const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  const tenantSlug = tenantSlugFromHost(host);
+  const tenantSlug =
+    tenantSlugFromHost(host) ?? (isRootHost(host) ? DEFAULT_TENANT_SLUG : null);
 
   if (!tenantSlug) {
     return NextResponse.next();
