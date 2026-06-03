@@ -39,7 +39,8 @@ export function tenantSlugFromHost(host: string | null | undefined): string | nu
 
   if (normalizedHost.endsWith(`.${SAAS_ROOT_DOMAIN}`)) {
     const subdomain = normalizedHost.slice(0, -1 * (SAAS_ROOT_DOMAIN.length + 1));
-    const slug = subdomain.startsWith("www.") ? subdomain.slice(4) : subdomain;
+    const firstLabel = subdomain.split(".")[0];
+    const slug = firstLabel.startsWith("www.") ? firstLabel.slice(4) : firstLabel;
     return slug || null;
   }
 
@@ -51,10 +52,31 @@ export function tenantSlugFromHost(host: string | null | undefined): string | nu
   return null;
 }
 
-export function tenantDomainFromSlug(slug: string): string {
+export function tenantDomainFromSlug(
+  slug: string,
+  currentHost?: string | null | undefined,
+): string {
+  const normalizedHost = normalizeHost(currentHost);
   const normalizedSlug = normalizeTenantSlug(slug) || "default";
-  if (normalizedSlug === "default") {
-    return `www.${SAAS_ROOT_DOMAIN}`;
+  if (
+    normalizedHost &&
+    (LOCAL_HOSTS.has(normalizedHost) || normalizedHost.endsWith(".localhost"))
+  ) {
+    if (normalizedSlug === "default") {
+      return "localhost";
+    }
+    return `${normalizedSlug}.localhost`;
   }
-  return `${normalizedSlug}.${SAAS_ROOT_DOMAIN}`;
+
+  const rootDomain =
+    normalizedHost && normalizedHost !== SAAS_ROOT_DOMAIN
+      ? normalizedHost.startsWith("www.")
+        ? normalizedHost.slice(4)
+        : normalizedHost
+      : SAAS_ROOT_DOMAIN;
+
+  if (normalizedSlug === "default") {
+    return rootDomain === SAAS_ROOT_DOMAIN ? `www.${SAAS_ROOT_DOMAIN}` : rootDomain;
+  }
+  return `${normalizedSlug}.${rootDomain}`;
 }
