@@ -357,6 +357,37 @@ export const listTenants = queryGeneric({
   },
 });
 
+export const upsertUserByEmail = mutationGeneric({
+  args: {
+    email: v.string(),
+    name: v.optional(v.string()),
+    tenantId: v.optional(v.string()),
+    handle: v.optional(v.string()),
+    role: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", (query) => query.eq("email", args.email))
+      .first();
+
+    const userPatch = {
+      email: args.email,
+      name: args.name,
+      tenantId: args.tenantId,
+      handle: args.handle,
+      role: args.role,
+    };
+
+    if (existing) {
+      await ctx.db.patch(existing._id, userPatch);
+      return existing._id;
+    }
+
+    return await ctx.db.insert("users", userPatch);
+  },
+});
+
 export const createAction = mutationGeneric({
   args: {
     tenantId: v.string(),

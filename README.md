@@ -141,15 +141,39 @@ cd /tmp/workspace/rkendel1/work/apps/web
 npm run build:wasm
 ```
 
+### 5) Seed simulation tenants + test login
+
+```bash
+cd /tmp/workspace/rkendel1/work
+CONVEX_DEPLOYMENT_URL=https://<deployment>.convex.cloud \
+CONVEX_ADMIN_KEY=<admin-key> \
+CLERK_SECRET_KEY=<clerk-secret-key> \
+npm run seed:simulation
+```
+
+The seed script creates these tenants in Convex:
+- `default` (Property Management / Commercial Real Estate)
+- `northstar_facilities` (Property Management / Commercial Real Estate)
+- `harbor_clinic_ops` (Healthcare / Clinic)
+
+It also ensures a Clerk login exists for testing (defaults can be overridden with env vars):
+- Email: `sim.tester@canonflo.local`
+- Password: `SimTester#2026`
+
 ## Environment Variables
 
 For Next.js (`apps/web/.env.local`):
 
 - `NEXT_PUBLIC_APP_URL`
 - `NEXT_PUBLIC_CONVEX_URL`
-- `BETTER_AUTH_SECRET`
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `CLERK_SECRET_KEY`
 - `POSTMARK_WEBHOOK_SECRET` (optional)
 - `RUST_INGRESS_URL`
+- `SEED_TEST_LOGIN_EMAIL` (optional)
+- `SEED_TEST_LOGIN_PASSWORD` (optional)
+- `SEED_TEST_LOGIN_FIRST_NAME` (optional)
+- `SEED_TEST_LOGIN_LAST_NAME` (optional)
 
 For Rust ingress (`services/ingress-engine` environment):
 
