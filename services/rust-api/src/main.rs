@@ -400,6 +400,7 @@ struct CreateTenantRequest {
     name: Option<String>,
     tenant_name: Option<String>,
     slug: Option<String>,
+    subdomain: Option<String>,
     vertical: Option<String>,
     industry: Option<String>,
 }
@@ -1253,6 +1254,33 @@ fn classifications_from_pack(
             description: classification.description.to_string(),
         })
         .collect()
+}
+
+fn onboarding_seed_signals(pack: &OperationalPack) -> Vec<&'static str> {
+    if pack.vertical == "Property Management" && pack.industry == "Commercial Real Estate" {
+        return vec![
+            "HVAC failure reported in Unit 304. Tenant says no cooling since 8am.",
+            "Vendor invoice mismatch for elevator maintenance contract. Charges do not match approved scope.",
+            "Maintenance request backlog spike across building C. 14 tickets are now overdue.",
+            "Elevator malfunction report from lobby. Intermittent shutdown during peak traffic.",
+        ];
+    }
+
+    if pack.vertical == "Healthcare" && pack.industry == "Clinic" {
+        return vec![
+            "Patient intake complaint: appointment check-in queue exceeded 40 minutes.",
+            "Billing discrepancy reported for outpatient visit claim line items.",
+            "Facility alert: refrigeration unit temperature drift in medication storage.",
+            "Provider schedule disruption caused follow-up appointment backlog.",
+        ];
+    }
+
+    vec![
+        "Urgent operations request received with unresolved ownership.",
+        "Invoice review requested due to unexpected line-item variance.",
+        "Service request aging beyond expected resolution window.",
+        "Escalation notice: workflow delay impacting downstream teams.",
+    ]
 }
 
 fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
@@ -2671,13 +2699,19 @@ async fn create_tenant(
     }
 
     let mut state = lock_state(&data);
-    let mut slug = request
-        .slug
-        .as_deref()
+    let requested_subdomain = request.slug.as_deref().or(request.subdomain.as_deref());
+    if requested_subdomain
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return HttpResponse::BadRequest().body("subdomain or slug is required");
+    }
+    let mut slug = requested_subdomain
         .map(normalize_identifier)
-        .unwrap_or_else(|| normalize_identifier(name));
+        .unwrap_or_default();
     if slug.is_empty() {
-        slug = format!("tenant_{}", Uuid::new_v4().simple());
+        return HttpResponse::BadRequest().body("subdomain or slug is required");
     }
     if state.tenants.iter().any(|tenant| tenant.slug == slug) {
         slug = format!("{slug}-{}", Uuid::new_v4().simple());
@@ -2709,9 +2743,140 @@ async fn create_tenant(
     state
         .classifications
         .extend(classifications_from_pack(&id, &pack));
+    let mut onboarding_seed = Vec::new();
+    for content in onboarding_seed_signals(&pack) {
+        let now = Utc::now().timestamp();
+        let signal_event = create_signal_event(
+            &mut state,
+            id.clone(),
+            "simulation".to_string(),
+            serde_json::json!({
+                "source": "simulation",
+                "content": content,
+                "scenario": "onboarding"
+            }),
+            content.to_string(),
+            SignalMetadata {
+                sender: Some("canonflo-sim@system.canonflo.com".to_string()),
+                timestamp: now,
+                channel: Some("simulation".to_string()),
+            },
+        );
+        let inbox_item = create_inbox_item(
+            &mut state,
+            id.clone(),
+            "simulation".to_string(),
+            content.to_string(),
+        );
+        let received_event = state
+            .ingress_events
+            .iter()
+            .find(|event| event.ingress_id == inbox_item.id && event.event_type == "received")
+            .cloned();
+        let work_item = create_work_item(&mut state, &inbox_item);
+        let classified_event = update_ingress_status(
+            &mut state,
+            inbox_item.id,
+            "classified",
+            format!("Classification: {}", work_item.title),
+        );
+        let recommendations_event = create_ingress_event(
+            &mut state,
+            inbox_item.id,
+            inbox_item.tenant_id.clone(),
+            "recommendations_generated".to_string(),
+            format!(
+                "Generated {} recommended actions",
+                work_item.recommended_actions.len()
+            ),
+        );
+        let work_generated_event = update_ingress_status(
+            &mut state,
+            inbox_item.id,
+            "work_generated",
+            format!("Created Work Item {}", work_item.id),
+        );
+        onboarding_seed.push((
+            signal_event,
+            inbox_item,
+            work_item,
+            received_event,
+            classified_event,
+            recommendations_event,
+            work_generated_event,
+        ));
+    }
     drop(state);
 
     forward_tenant_bootstrap_to_convex(&data.client, &data.convex_config, &tenant).await;
+    for (
+        signal_event,
+        inbox_item,
+        work_item,
+        received_event,
+        classified_event,
+        recommendations_event,
+        work_generated_event,
+    ) in onboarding_seed
+    {
+        if let Err(error) =
+            forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+        {
+            eprintln!("failed to forward onboarding signal event to convex: {error}");
+        }
+        if let Err(error) =
+            forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await
+        {
+            eprintln!("failed to forward onboarding inbox item to convex: {error}");
+        }
+        if let Some(event) = received_event
+            && let Err(error) = forward_ingress_event_to_convex(
+                &data.client,
+                &data.convex_config,
+                inbox_item.id,
+                &event,
+            )
+            .await
+        {
+            eprintln!("failed to forward onboarding ingress event to convex: {error}");
+        }
+        if let Err(error) = forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
+        {
+            eprintln!("failed to forward onboarding work item to convex: {error}");
+        }
+        if let Some(event) = classified_event
+            && let Err(error) = forward_status_update_to_convex(
+                &data.client,
+                &data.convex_config,
+                inbox_item.id,
+                &event,
+            )
+            .await
+        {
+            eprintln!("failed to forward onboarding classified status to convex: {error}");
+        }
+        if let Err(error) = forward_ingress_event_to_convex(
+            &data.client,
+            &data.convex_config,
+            inbox_item.id,
+            &recommendations_event,
+        )
+        .await
+        {
+            eprintln!("failed to forward onboarding recommendations to convex: {error}");
+        }
+        if let Some(event) = work_generated_event
+            && let Err(error) = forward_status_update_to_convex(
+                &data.client,
+                &data.convex_config,
+                inbox_item.id,
+                &event,
+            )
+            .await
+        {
+            eprintln!("failed to forward onboarding work-generated status to convex: {error}");
+        }
+    }
     HttpResponse::Created().json(tenant)
 }
 
@@ -4891,6 +5056,7 @@ mod tests {
             .uri("/tenants")
             .set_json(&serde_json::json!({
                 "name": "Acme Property Management",
+                "subdomain": "acme",
                 "vertical": "Property Management",
                 "industry": "Commercial Real Estate"
             }))
@@ -4903,8 +5069,8 @@ mod tests {
         let actions: Vec<ActionDefinition> = test::call_and_read_body_json(&app, actions_req).await;
 
         assert!(!actions.is_empty());
-        assert_eq!(tenant.slug, "acme_property_management");
-        assert_eq!(tenant.domain, "acme_property_management.canonflo.com");
+        assert_eq!(tenant.slug, "acme");
+        assert_eq!(tenant.domain, "acme.canonflo.com");
         assert!(
             actions
                 .iter()
@@ -4926,7 +5092,7 @@ mod tests {
             .uri("/tenants")
             .set_json(&serde_json::json!({
                 "tenantName": "River Clinic",
-                "slug": "river-clinic"
+                "subdomain": "river-clinic"
             }))
             .to_request();
         let tenant: Tenant = test::call_and_read_body_json(&app, create_tenant_req).await;
@@ -4934,6 +5100,56 @@ mod tests {
         assert_eq!(tenant.name, "River Clinic");
         assert_eq!(tenant.slug, "river_clinic");
         assert_eq!(tenant.domain, "river_clinic.canonflo.com");
+    }
+
+    #[actix_web::test]
+    async fn creating_tenant_requires_subdomain_or_slug() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_tenant_req = test::TestRequest::post()
+            .uri("/tenants")
+            .set_json(&serde_json::json!({
+                "name": "Missing Subdomain Tenant"
+            }))
+            .to_request();
+        let response = test::call_service(&app, create_tenant_req).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn creating_tenant_seeds_onboarding_signals_and_work_items() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_tenant_req = test::TestRequest::post()
+            .uri("/tenants")
+            .set_json(&serde_json::json!({
+                "name": "Acme Property Management",
+                "subdomain": "acme-live",
+                "vertical": "Property Management",
+                "industry": "Commercial Real Estate"
+            }))
+            .to_request();
+        let tenant: Tenant = test::call_and_read_body_json(&app, create_tenant_req).await;
+
+        let items_req = test::TestRequest::get()
+            .uri(&format!("/items?tenantId={}", tenant.id))
+            .to_request();
+        let inbox_items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
+
+        let work_req = test::TestRequest::get()
+            .uri(&format!("/work?tenantId={}", tenant.id))
+            .to_request();
+        let work_items: Vec<WorkItem> = test::call_and_read_body_json(&app, work_req).await;
+
+        assert!(!inbox_items.is_empty());
+        assert!(!work_items.is_empty());
+        assert!(
+            inbox_items
+                .iter()
+                .all(|item| item.source.eq_ignore_ascii_case("simulation"))
+        );
+        assert!(inbox_items.iter().all(|item| item.status == "work_generated"));
     }
 
     #[actix_web::test]

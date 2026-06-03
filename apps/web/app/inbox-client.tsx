@@ -59,6 +59,8 @@ export type WorkItem = {
 
 type Tenant = {
   id: string;
+  slug?: string;
+  domain?: string;
   display_name: string;
   vertical: string;
   industry: string;
@@ -322,6 +324,7 @@ export function InboxClient({
   const [newActionOrgUnitId, setNewActionOrgUnitId] = useState("");
   const [newActionDefaultOwnerRole, setNewActionDefaultOwnerRole] = useState("");
   const [tenantName, setTenantName] = useState("");
+  const [tenantSubdomain, setTenantSubdomain] = useState("");
   const [tenantVertical, setTenantVertical] = useState(SETUP_PACKS[0].vertical);
   const [tenantIndustry, setTenantIndustry] = useState(SETUP_PACKS[0].industries[0]);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
@@ -517,6 +520,7 @@ export function InboxClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: tenantName,
+        slug: tenantSubdomain,
         vertical: tenantVertical,
         industry: tenantIndustry,
       }),
@@ -529,10 +533,11 @@ export function InboxClient({
 
     const tenant = (await response.json()) as Tenant;
     setTenantName("");
+    setTenantSubdomain("");
     setTenantId(tenant.id);
     setTab("inbox");
     setSetupMessage(
-      `We've configured your Operations Inbox for ${tenant.vertical} • ${tenant.industry}.`,
+      `We've configured your Operations Inbox for ${tenant.vertical} • ${tenant.industry} at ${tenant.domain ?? `${tenant.id}.canonflo.com`}.`,
     );
   }
 
@@ -804,6 +809,18 @@ export function InboxClient({
 
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
+  const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
+  const normalizedInboundLocalPart = (selectedTenant?.slug ?? tenantId)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "");
+  const inboundAddress = `${normalizedInboundLocalPart || "default"}@inbound.canonflo.com`;
+  const inferredActionTitles = Array.from(
+    new Set(
+      workItems.flatMap((work) =>
+        (work.recommended_actions ?? []).map((action) => action.title),
+      ),
+    ),
+  ).slice(0, 3);
   const operationalMeaningForWork = (work: WorkItem) => {
     if (!work.operational_meaning) {
       return contextFallback();
@@ -895,6 +912,70 @@ export function InboxClient({
 
       {tab === "inbox" ? (
         <>
+          <section className="space-y-4 rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
+            <h2 className="text-lg font-semibold dark:text-zinc-100">Live Operational Feed (Inferred)</h2>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Incoming Signals
+                </p>
+                <ul className="mt-2 space-y-1 text-sm text-zinc-700 dark:text-zinc-300">
+                  {inboxItems.slice(0, 3).map((item) => (
+                    <li key={`inferred-signal-${item.id}`} className="rounded border dark:border-zinc-700 dark:bg-zinc-700 px-2 py-1">
+                      {item.content}
+                    </li>
+                  ))}
+                  {inboxItems.length === 0 ? <li>No signals yet.</li> : null}
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  Interpretation Layer
+                </p>
+                <ul className="mt-2 space-y-1 text-sm text-zinc-700 dark:text-zinc-300">
+                  {workItems.slice(0, 3).map((work) => {
+                    const context = operationalMeaningForWork(work);
+                    return (
+                      <li key={`inferred-work-${work.id}`} className="rounded border dark:border-zinc-700 dark:bg-zinc-700 px-2 py-1">
+                        {work.classification_type} ({(context.confidence * 100).toFixed(0)}%) → {context.inferredMeaning}
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">Reason: {work.summary}</p>
+                      </li>
+                    );
+                  })}
+                  {workItems.length === 0 ? <li>No interpretations yet.</li> : null}
+                </ul>
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Suggested Actions
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {inferredActionTitles.map((title) => (
+                  <span key={`inferred-action-${title}`} className="rounded border dark:border-zinc-700 dark:bg-zinc-700 px-2 py-1 text-xs">
+                    {title}
+                  </span>
+                ))}
+                {inferredActionTitles.length === 0 ? (
+                  <span className="text-sm text-zinc-600 dark:text-zinc-400">No actions generated yet.</span>
+                ) : null}
+              </div>
+            </div>
+            <div className="rounded border dark:border-zinc-700 dark:bg-zinc-700 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Connect Real Ingress
+              </p>
+              <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">Inbound address: {inboundAddress}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button type="button" className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">Connect Email (Postmark)</button>
+                <a href={`mailto:${inboundAddress}`} className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">Send Test Email</a>
+                <button type="button" onClick={() => setSource("simulation")} className="rounded border dark:border-zinc-600 px-3 py-1 text-xs">
+                  Use Simulation Mode
+                </button>
+              </div>
+            </div>
+          </section>
+
           <form onSubmit={onSubmit} className="space-y-3 rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
             <label className="block text-sm font-medium dark:text-zinc-300" htmlFor="source">
               Signal source
@@ -1567,6 +1648,13 @@ export function InboxClient({
               onChange={(event) => setTenantName(event.target.value)}
               className="rounded border dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100 px-3 py-2"
               placeholder="Organization Name"
+              required
+            />
+            <input
+              value={tenantSubdomain}
+              onChange={(event) => setTenantSubdomain(event.target.value)}
+              className="rounded border dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100 px-3 py-2"
+              placeholder="Subdomain (e.g. acme)"
               required
             />
             <input value={tenantVertical} className="rounded border dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100 px-3 py-2" readOnly />
