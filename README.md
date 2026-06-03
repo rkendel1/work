@@ -71,7 +71,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `operational_context`
 - `action_selections`
 - `work_outcomes`
-- `action_executions`
+- `execution_results`
 - `behavioral_patterns`
 - `process_nodes`
 - `process_edges`
