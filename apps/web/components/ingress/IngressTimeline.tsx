@@ -11,7 +11,7 @@ type Props = {
 
 export function IngressTimeline({ events }: Props) {
   if (events.length === 0) {
-    return <p className="text-zinc-600">No processing events yet.</p>;
+    return <p className="text-zinc-600 dark:text-zinc-400">No processing events yet.</p>;
   }
 
   return (

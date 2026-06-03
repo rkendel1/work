@@ -30,13 +30,13 @@ export default async function Home() {
     return (
       <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center gap-8 px-6 py-20">
         <section className="space-y-4">
-          <p className="text-sm font-medium uppercase tracking-wide text-zinc-600">
+          <p className="text-sm font-medium uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
             Canonflo Operations
           </p>
           <h1 className="text-4xl font-semibold">
             See your operations in real time from your first signal.
           </h1>
-          <ul className="list-disc space-y-1 pl-5 text-zinc-700">
+          <ul className="list-disc space-y-1 pl-5 text-zinc-700 dark:text-zinc-300">
             <li>connect inbox</li>
             <li>forward email</li>
             <li>ingest webhook</li>
@@ -46,14 +46,14 @@ export default async function Home() {
         <section className="flex flex-wrap gap-3">
           <Link
             href="/sign-up"
-            className="rounded bg-zinc-900 px-4 py-2 font-medium text-white"
+            className="rounded bg-zinc-900 px-4 py-2 font-medium text-white dark:bg-zinc-100 dark:text-zinc-900"
           >
             Sign up
           </Link>
-          <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2">
+          <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             Run Simulation
           </Link>
-          <Link href="https://default.canonflo.com" className="rounded border border-zinc-300 px-4 py-2">
+          <Link href="https://default.canonflo.com" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             View Live Demo Tenant
           </Link>
         </section>
@@ -68,16 +68,16 @@ export default async function Home() {
 
   return (
     <main className="space-y-4 p-4">
-      <header className="rounded-lg border bg-white p-4">
+      <header className="rounded-lg border bg-white p-4 dark:bg-zinc-800 dark:border-zinc-700">
         <h1 className="text-2xl font-semibold">Live Operations Feed</h1>
-        <p className="text-sm text-zinc-600">
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
           Tenant-scoped real-time inbox, meaning, work, and execution.
         </p>
         <div className="mt-3 flex gap-3 text-sm">
-          <Link href="/simulate" className="underline">
+          <Link href="/simulate" className="underline dark:text-zinc-300">
             Run Simulation
           </Link>
-          <Link href="/sign-in" className="underline">
+          <Link href="/sign-in" className="underline dark:text-zinc-300">
             Sign in
           </Link>
         </div>

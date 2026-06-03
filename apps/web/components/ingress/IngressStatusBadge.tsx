@@ -18,7 +18,7 @@ const LABELS: Record<string, string> = {
 
 export function IngressStatusBadge({ status }: Props) {
   return (
-    <span className="inline-flex rounded-full border px-2 py-0.5 text-xs font-medium text-zinc-700">
+    <span className="inline-flex rounded-full border px-2 py-0.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 dark:border-zinc-600">
       {LABELS[status] ?? status}
     </span>
   );

@@ -9,7 +9,7 @@ export default function SignInPage() {
 
   if (!clerkConfigured) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-6 py-16 text-center text-sm text-zinc-600">
+      <main className="flex min-h-screen items-center justify-center px-6 py-16 text-center text-sm text-zinc-600 dark:text-zinc-400">
         Configure Clerk environment variables to enable sign in.
       </main>
     );
