@@ -107,10 +107,13 @@ export default defineSchema({
     .index("by_tenant_name", ["tenantId", "name"]),
   tenants: defineTable({
     id: v.string(),
+    name: v.string(),
     slug: v.string(),
+    domain: v.string(),
     displayName: v.string(),
-    vertical: v.string(),
-    industry: v.string(),
+    vertical: v.optional(v.string()),
+    industry: v.optional(v.string()),
+    createdAt: v.number(),
   }).index("by_slug", ["slug"]),
   org_units: defineTable({
     tenantId: v.string(),

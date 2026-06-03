@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { resolveTenantId } from "@/lib/tenant-context";
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
-  const tenantId = requestUrl.searchParams.get("tenantId");
+  const tenantId = resolveTenantId(request);
   const type = requestUrl.searchParams.get("type");
   const q = requestUrl.searchParams.get("q");
   const query = new URLSearchParams();

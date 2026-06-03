@@ -272,9 +272,12 @@ struct PostmarkWebhookResponse {
 struct Tenant {
     id: String,
     slug: String,
+    domain: String,
+    name: String,
     display_name: String,
     vertical: String,
     industry: String,
+    created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,9 +394,11 @@ struct OperationalPack {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTenantRequest {
-    name: String,
-    vertical: String,
-    industry: String,
+    name: Option<String>,
+    tenant_name: Option<String>,
+    slug: Option<String>,
+    vertical: Option<String>,
+    industry: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -571,15 +576,20 @@ struct State {
 const DEFAULT_TENANT_ID: &str = "default";
 const DEFAULT_TENANT_SLUG: &str = "default";
 const DEFAULT_TENANT_NAME: &str = "Default Tenant";
+const DEFAULT_TENANT_DOMAIN: &str = "default.canonflo.com";
+const TENANT_BASE_DOMAIN: &str = "canonflo.com";
 
 impl Default for State {
     fn default() -> Self {
         let default_tenant = Tenant {
             id: DEFAULT_TENANT_ID.to_string(),
             slug: DEFAULT_TENANT_SLUG.to_string(),
+            domain: DEFAULT_TENANT_DOMAIN.to_string(),
+            name: DEFAULT_TENANT_NAME.to_string(),
             display_name: DEFAULT_TENANT_NAME.to_string(),
             vertical: "Property Management".to_string(),
             industry: "Commercial Real Estate".to_string(),
+            created_at: Utc::now().timestamp(),
         };
         let default_pack = load_pack("Property Management", "Commercial Real Estate");
         let org_units = org_units_from_pack(&default_tenant.id, &default_pack);
@@ -1251,9 +1261,12 @@ fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
     let tenant = Tenant {
         id: tenant_id.to_string(),
         slug: normalize_identifier(tenant_id),
+        domain: format!("{}.{}", normalize_identifier(tenant_id), TENANT_BASE_DOMAIN),
+        name: tenant_id.to_string(),
         display_name: tenant_id.to_string(),
         vertical: "General".to_string(),
         industry: "General".to_string(),
+        created_at: Utc::now().timestamp(),
     };
     state.tenants.push(tenant);
     let _ = ensure_default_org_unit(state, tenant_id);
@@ -1956,10 +1969,13 @@ struct ConvexUpdateIngressStatusArgs {
 #[serde(rename_all = "camelCase")]
 struct ConvexTenantArgs {
     id: String,
+    name: String,
     slug: String,
+    domain: String,
     display_name: String,
     vertical: String,
     industry: String,
+    created_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2227,10 +2243,13 @@ async fn forward_tenant_bootstrap_to_convex(
         "actions:createTenant",
         ConvexTenantArgs {
             id: tenant.id.clone(),
+            name: tenant.name.clone(),
             slug: tenant.slug.clone(),
+            domain: tenant.domain.clone(),
             display_name: tenant.display_name.clone(),
             vertical: tenant.vertical.clone(),
             industry: tenant.industry.clone(),
+            created_at: tenant.created_at,
         },
     )
     .await
@@ -2626,30 +2645,57 @@ async fn create_tenant(
     data: web::Data<AppState>,
     request: web::Json<CreateTenantRequest>,
 ) -> impl Responder {
-    let name = request.name.trim();
-    let vertical = request.vertical.trim();
-    let industry = request.industry.trim();
-    if name.is_empty() || vertical.is_empty() || industry.is_empty() {
-        return HttpResponse::BadRequest().body("name, vertical, and industry are required");
+    let name = request
+        .tenant_name
+        .as_deref()
+        .or(request.name.as_deref())
+        .unwrap_or("")
+        .trim();
+    let vertical = request
+        .vertical
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("General");
+    let industry = request
+        .industry
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("General");
+    if name.is_empty() {
+        return HttpResponse::BadRequest().body("tenantName or name is required");
     }
 
     let mut state = lock_state(&data);
-    let mut slug = normalize_identifier(name);
+    let mut slug = request
+        .slug
+        .as_deref()
+        .map(normalize_identifier)
+        .unwrap_or_else(|| normalize_identifier(name));
     if slug.is_empty() {
         slug = format!("tenant_{}", Uuid::new_v4().simple());
+    }
+    if state.tenants.iter().any(|tenant| tenant.slug == slug) {
+        slug = format!("{slug}-{}", Uuid::new_v4().simple());
     }
     let mut id = slug.clone();
     if state.tenants.iter().any(|tenant| tenant.id == id) {
         id = format!("{id}_{}", Uuid::new_v4().simple());
     }
+    let created_at = Utc::now().timestamp();
+    let domain = format!("{slug}.{TENANT_BASE_DOMAIN}");
 
     let pack = load_pack(vertical, industry);
     let tenant = Tenant {
         id: id.clone(),
-        slug,
+        slug: slug.clone(),
+        domain,
+        name: name.to_string(),
         display_name: name.to_string(),
         vertical: pack.vertical.to_string(),
         industry: pack.industry.to_string(),
+        created_at,
     };
     let org_units = org_units_from_pack(&id, &pack);
     state.tenants.push(tenant.clone());
@@ -4801,6 +4847,8 @@ mod tests {
         let actions: Vec<ActionDefinition> = test::call_and_read_body_json(&app, actions_req).await;
 
         assert!(!actions.is_empty());
+        assert_eq!(tenant.slug, "acme_property_management");
+        assert_eq!(tenant.domain, "acme_property_management.canonflo.com");
         assert!(
             actions
                 .iter()
@@ -4815,6 +4863,24 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn creating_tenant_accepts_signup_payload_shape() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_tenant_req = test::TestRequest::post()
+            .uri("/tenants")
+            .set_json(&serde_json::json!({
+                "tenantName": "River Clinic",
+                "slug": "river-clinic"
+            }))
+            .to_request();
+        let tenant: Tenant = test::call_and_read_body_json(&app, create_tenant_req).await;
+
+        assert_eq!(tenant.name, "River Clinic");
+        assert_eq!(tenant.slug, "river_clinic");
+        assert_eq!(tenant.domain, "river_clinic.canonflo.com");
+    }
+
+    #[actix_web::test]
     async fn falls_back_to_pack_actions_when_tenant_action_catalog_is_empty() {
         let app_state = test_state();
         {
@@ -4822,9 +4888,12 @@ mod tests {
             state.tenants.push(Tenant {
                 id: "clinic-tenant".to_string(),
                 slug: "clinic-tenant".to_string(),
+                domain: "clinic-tenant.canonflo.com".to_string(),
+                name: "Clinic Tenant".to_string(),
                 display_name: "Clinic Tenant".to_string(),
                 vertical: "Healthcare".to_string(),
                 industry: "Clinic".to_string(),
+                created_at: Utc::now().timestamp(),
             });
         }
         let app = test::init_service(App::new().app_data(app_state).configure(app_config)).await;

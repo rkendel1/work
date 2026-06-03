@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { resolveTenantId } from "@/lib/tenant-context";
 
 export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenantId");
+  const tenantId = resolveTenantId(request);
   const query = new URLSearchParams();
   if (tenantId) {
     query.set("tenantId", tenantId);
@@ -36,6 +36,10 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   const url = new URL(request.url);
+  const tenantId = resolveTenantId(request);
+  if (tenantId && !url.searchParams.has("tenantId")) {
+    url.searchParams.set("tenantId", tenantId);
+  }
   const response = await fetch(`${RUST_INGRESS_URL}/vault/keys?${url.searchParams.toString()}`, {
     method: "DELETE",
   });
