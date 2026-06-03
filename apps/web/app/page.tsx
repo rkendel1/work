@@ -1,8 +1,10 @@
 import { InboxClient, InboxItem, WorkItem } from "@/app/inbox-client";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
+import { auth } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { headers } from "next/headers";
+import { redirect } from "next/navigation";
 
 async function fetchInitial<T>(path: string, tenantId?: string): Promise<T[]> {
   try {
@@ -25,10 +27,27 @@ export default async function Home() {
   const headerStore = await headers();
   const host = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
   const authBypassEnabled = process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true";
-  const tenantSlug = tenantSlugFromHost(host) ?? (isRootHost(host) ? "default" : null);
+  const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  const clerkConfigured = Boolean(
+    clerkPublishableKey &&
+      /^pk_(test|live)_[A-Za-z0-9_-]+$/.test(clerkPublishableKey) &&
+      (process.env.NODE_ENV !== "development" ||
+        process.env.NEXT_PUBLIC_ENABLE_CLERK_IN_DEV === "true"),
+  );
+  const { userId } =
+    clerkConfigured && !authBypassEnabled ? await auth() : { userId: null };
+  const tenantSlug = tenantSlugFromHost(host);
   const tenantId =
     headerStore.get("x-tenant-id") ??
-    (authBypassEnabled && (!tenantSlug || tenantSlug === "default") ? "default" : undefined);
+    (authBypassEnabled && !tenantSlug ? "default" : undefined);
+
+  if (clerkConfigured && !authBypassEnabled && userId && isRootHost(host)) {
+    redirect("/onboarding");
+  }
+
+  if (clerkConfigured && !authBypassEnabled && !userId && tenantSlug) {
+    redirect("/sign-in");
+  }
 
   if (!tenantSlug && !authBypassEnabled) {
     return (
@@ -54,6 +73,14 @@ export default async function Home() {
           >
             Sign up
           </Link>
+          <Link href="/sign-in" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
+            Sign in
+          </Link>
+          {clerkConfigured && !userId ? null : (
+            <Link href="/onboarding" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
+              Onboarding
+            </Link>
+          )}
           <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             Inject Scenario
           </Link>
