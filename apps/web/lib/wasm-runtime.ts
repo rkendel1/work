@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 type WasmBindgenExports = WebAssembly.Exports & {
-  __wbindgen_add_to_stack_pointer: (value: number) => number;
   __wbindgen_malloc: (size: number, align: number) => number;
   __wbindgen_realloc: (
     ptr: number,
@@ -13,7 +12,7 @@ type WasmBindgenExports = WebAssembly.Exports & {
   __wbindgen_free: (ptr: number, size: number, align: number) => void;
   __wbindgen_start: () => void;
   __wbindgen_externrefs: WebAssembly.Table;
-  process: (retPtr: number, ptr: number, len: number) => void;
+  process: (ptr: number, len: number) => [number, number];
   memory: WebAssembly.Memory;
 };
 
@@ -34,20 +33,12 @@ function readWasmArtifact() {
 function createProcessBinding(wasm: WasmBindgenExports): WasmRuntime["process"] {
   let vectorLength = 0;
   let cachedUint8Memory: Uint8Array | null = null;
-  let cachedInt32Memory: Int32Array | null = null;
 
   function getUint8Memory() {
     if (cachedUint8Memory === null || cachedUint8Memory.byteLength === 0) {
       cachedUint8Memory = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8Memory;
-  }
-
-  function getInt32Memory() {
-    if (cachedInt32Memory === null || cachedInt32Memory.byteLength === 0) {
-      cachedInt32Memory = new Int32Array(wasm.memory.buffer);
-    }
-    return cachedInt32Memory;
   }
 
   function passStringToWasm(value: string) {
@@ -85,21 +76,12 @@ function createProcessBinding(wasm: WasmBindgenExports): WasmRuntime["process"] 
   }
 
   return (input: string) => {
-    const retPointer = wasm.__wbindgen_add_to_stack_pointer(-16);
-    try {
-      const inputPointer = passStringToWasm(input);
-      const inputLength = vectorLength;
-      wasm.process(retPointer, inputPointer, inputLength);
-
-      const memory = getInt32Memory();
-      const resultPointer = memory[retPointer / 4];
-      const resultLength = memory[retPointer / 4 + 1];
-      const output = readString(resultPointer, resultLength);
-      wasm.__wbindgen_free(resultPointer, resultLength, 1);
-      return output;
-    } finally {
-      wasm.__wbindgen_add_to_stack_pointer(16);
-    }
+    const inputPointer = passStringToWasm(input);
+    const inputLength = vectorLength;
+    const [resultPointer, resultLength] = wasm.process(inputPointer, inputLength);
+    const output = readString(resultPointer, resultLength);
+    wasm.__wbindgen_free(resultPointer, resultLength, 1);
+    return output;
   };
 }
 
