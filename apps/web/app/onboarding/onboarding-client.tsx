@@ -1,5 +1,6 @@
 "use client";
 
+import { SignOutButton } from "@clerk/nextjs";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 
@@ -56,7 +57,11 @@ function tenantUrl(tenant: Tenant): string {
   return `${current.protocol}//${host}/`;
 }
 
-export function OnboardingClient() {
+type OnboardingClientProps = {
+  userIdentifier?: string | null;
+};
+
+export function OnboardingClient({ userIdentifier = null }: OnboardingClientProps) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -121,10 +126,29 @@ export function OnboardingClient() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-6 py-10">
       <header className="space-y-2">
-        <p className="text-sm font-medium uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
-          Canonflo onboarding
-        </p>
-        <h1 className="text-3xl font-semibold">Create or select your tenant workspace</h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
+              Canonflo onboarding
+            </p>
+            <h1 className="text-3xl font-semibold">Create or select your tenant workspace</h1>
+          </div>
+          {userIdentifier ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-zinc-600 dark:text-zinc-400">
+                Signed in as <strong className="text-zinc-900 dark:text-zinc-100">{userIdentifier}</strong>
+              </span>
+              <SignOutButton redirectUrl="/sign-in">
+                <button
+                  type="button"
+                  className="rounded border border-zinc-300 px-3 py-1 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                >
+                  Log out
+                </button>
+              </SignOutButton>
+            </div>
+          ) : null}
+        </div>
       </header>
 
       {error ? (
