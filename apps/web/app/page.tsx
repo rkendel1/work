@@ -53,8 +53,8 @@ export default async function Home() {
           <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             Run Simulation
           </Link>
-          <Link href="https://default.canonflo.com" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
-            View Live Demo Tenant
+          <Link href="/" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
+            View Live Feed
           </Link>
         </section>
       </main>
