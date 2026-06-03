@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 import { resolveTenantId } from "@/lib/tenant-context";
+import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type SignalPayload = {
   sourceType?: string;
@@ -24,7 +24,7 @@ export async function POST(request: Request) {
   }
 
   const sourceType = payload.sourceType?.trim() || "api";
-  const tenantId = payload.tenantId?.trim() || resolveTenantId(request);
+  const tenantId = payload.tenantId?.trim() || resolveTenantId(request) || "default";
   const normalizedContent = payload.normalizedContent?.trim();
 
   if (!normalizedContent && !payload.rawPayload) {
@@ -34,42 +34,19 @@ export async function POST(request: Request) {
     );
   }
 
-  const ingestResponse = await fetch(`${RUST_INGRESS_URL}/signals`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  try {
+    const result = await ingestSignalWithWasm({
+      tenantId,
       sourceType,
-      rawPayload: payload.rawPayload,
+      rawPayload: payload.rawPayload ?? {},
       normalizedContent,
       metadata: payload.metadata,
-      tenantId,
-    }),
-  });
-
-  if (!ingestResponse.ok) {
-    const body = await ingestResponse.text();
+    });
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
     return NextResponse.json(
-      { error: "Signal ingest failed", upstreamBody: body },
-      { status: ingestResponse.status },
+      { error: "WASM signal ingest failed", detail: error instanceof Error ? error.message : "unknown" },
+      { status: 500 },
     );
   }
-
-  const inboxItem = (await ingestResponse.json()) as { id: string };
-
-  const extractResponse = await fetch(`${RUST_INGRESS_URL}/extract`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ inbox_item_id: inboxItem.id }),
-  });
-
-  if (!extractResponse.ok) {
-    const body = await extractResponse.text();
-    return NextResponse.json(
-      { error: "Signal extraction failed", inboxItem, upstreamBody: body },
-      { status: extractResponse.status },
-    );
-  }
-
-  const workItem = await extractResponse.json();
-  return NextResponse.json({ inboxItem, workItem }, { status: 201 });
 }

@@ -1032,6 +1032,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]
