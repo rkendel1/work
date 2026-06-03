@@ -28,7 +28,7 @@ export default async function Home() {
   const tenantSlug = tenantSlugFromHost(host);
   const tenantId =
     headerStore.get("x-tenant-id") ??
-    (authBypassEnabled && !tenantSlug ? "default" : undefined);
+    (authBypassEnabled && (!tenantSlug || tenantSlug === "default") ? "default" : undefined);
 
   if (!tenantSlug && !authBypassEnabled) {
     return (
