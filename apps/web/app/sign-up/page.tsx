@@ -1,11 +1,6 @@
 import { SignUp } from "@clerk/nextjs";
-import { redirect } from "next/navigation";
 
 export default function SignUpPage() {
-  if (process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true") {
-    redirect("/");
-  }
-
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const clerkConfigured =
     clerkPublishableKey &&

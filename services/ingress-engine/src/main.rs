@@ -576,7 +576,7 @@ struct State {
 const DEFAULT_TENANT_ID: &str = "default";
 const DEFAULT_TENANT_SLUG: &str = "default";
 const DEFAULT_TENANT_NAME: &str = "Default Tenant";
-const DEFAULT_TENANT_DOMAIN: &str = "default.canonflo.com";
+const DEFAULT_TENANT_DOMAIN: &str = "www.canonflo.com";
 const TENANT_BASE_DOMAIN: &str = "canonflo.com";
 
 impl Default for State {
@@ -4481,6 +4481,17 @@ mod tests {
 
     fn test_state() -> web::Data<AppState> {
         web::Data::new(AppState::new(ConvexConfig::default()))
+    }
+
+    #[actix_web::test]
+    async fn default_tenant_uses_root_www_domain() {
+        let state = State::default();
+        let default_tenant = state
+            .tenants
+            .iter()
+            .find(|tenant| tenant.id == DEFAULT_TENANT_ID)
+            .expect("default tenant should exist");
+        assert_eq!(default_tenant.domain, "www.canonflo.com");
     }
 
     #[actix_web::test]
