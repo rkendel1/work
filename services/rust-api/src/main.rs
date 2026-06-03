@@ -17,8 +17,10 @@ use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 mod config;
+mod domain;
 mod recommendation_engine;
 pub(crate) mod routes;
+mod runtime_flow;
 use config::Config;
 use routes::app_config;
 
@@ -701,6 +703,7 @@ pub(crate) struct AppState {
     convex_config: ConvexConfig,
     client: Client,
     vault_crypto: VaultCrypto,
+    event_bus: domain::event_bus::EventBus,
 }
 
 impl AppState {
@@ -710,6 +713,7 @@ impl AppState {
             convex_config,
             client: Client::new(),
             vault_crypto: VaultCrypto::from_env(),
+            event_bus: domain::event_bus::EventBus::new(),
         }
     }
 }
@@ -2439,27 +2443,24 @@ async fn ingest(data: web::Data<AppState>, payload: web::Bytes) -> impl Responde
             "content": request.content.clone(),
         });
         let normalized_content = normalize_signal_content(&raw_payload, Some(&request.content));
-        let signal_event = create_signal_event(
+        let flow = runtime_flow::ingest_signal_to_inbox(
             &mut state,
-            tenant_id.clone(),
-            request.source.clone(),
-            default_signal_provenance(&request.source),
-            raw_payload,
-            normalized_content.clone(),
-            SignalMetadata {
-                sender: None,
-                timestamp: Utc::now().timestamp(),
-                channel: None,
+            &data.event_bus,
+            runtime_flow::SignalIngestionInput {
+                tenant_id,
+                source_type: request.source.clone(),
+                inbox_source: None,
+                provenance: default_signal_provenance(&request.source),
+                raw_payload,
+                normalized_content,
+                metadata: SignalMetadata {
+                    sender: None,
+                    timestamp: Utc::now().timestamp(),
+                    channel: None,
+                },
             },
         );
-        let item = create_inbox_item(
-            &mut state,
-            tenant_id,
-            request.source.clone(),
-            normalized_content,
-        );
-        let received_event = state.ingress_events.last().cloned();
-        (signal_event, item, received_event)
+        (flow.signal_event, flow.inbox_item, flow.received_event)
     };
 
     if let Err(error) =
@@ -2543,23 +2544,20 @@ async fn ingest_signal(
         let mut state = lock_state(&data);
         let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
         ensure_tenant_exists(&mut state, &tenant_id);
-        let signal_event = create_signal_event(
+        let flow = runtime_flow::ingest_signal_to_inbox(
             &mut state,
-            tenant_id.clone(),
-            source_type.clone(),
-            provenance,
-            raw_payload,
-            normalized_content.clone(),
-            metadata,
+            &data.event_bus,
+            runtime_flow::SignalIngestionInput {
+                tenant_id,
+                source_type: source_type.clone(),
+                inbox_source: None,
+                provenance,
+                raw_payload,
+                normalized_content,
+                metadata,
+            },
         );
-        let inbox_item = create_inbox_item(
-            &mut state,
-            tenant_id,
-            source_type.clone(),
-            normalized_content,
-        );
-        let received_event = state.ingress_events.last().cloned();
-        (signal_event, inbox_item, received_event)
+        (flow.signal_event, flow.inbox_item, flow.received_event)
     };
 
     if let Err(error) =
@@ -2591,55 +2589,20 @@ async fn ingest_signal(
 async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) -> impl Responder {
     let (work_item, is_new, status_updates, recommendation_events) = {
         let mut state = lock_state(&data);
-
-        if let Some(existing) = state
-            .work_items
-            .iter()
-            .find(|work_item| work_item.inbox_item_id == request.inbox_item_id)
-            .cloned()
-        {
-            (existing, false, Vec::new(), Vec::new())
-        } else {
-            let Some(inbox_item) = state
-                .inbox_items
-                .iter()
-                .find(|item| item.id == request.inbox_item_id)
-                .cloned()
-            else {
+        match runtime_flow::extract_work_from_inbox(
+            &mut state,
+            &data.event_bus,
+            request.inbox_item_id,
+        ) {
+            Ok(flow) => (
+                flow.work_item,
+                flow.is_new,
+                flow.status_updates,
+                flow.recommendation_events,
+            ),
+            Err(runtime_flow::WorkExtractionError::InboxItemNotFound) => {
                 return HttpResponse::NotFound().body("inbox item not found");
-            };
-
-            let work_item = create_work_item(&mut state, &inbox_item);
-            let mut status_updates = Vec::new();
-            if let Some(classified_event) = update_ingress_status(
-                &mut state,
-                inbox_item.id,
-                "classified",
-                format!("Classification: {}", work_item.title),
-            ) {
-                status_updates.push((inbox_item.id, classified_event));
             }
-            let recommendations_event = create_ingress_event(
-                &mut state,
-                inbox_item.id,
-                inbox_item.tenant_id.clone(),
-                "recommendations_generated".to_string(),
-                format!(
-                    "Generated {} recommended actions",
-                    work_item.recommended_actions.len()
-                ),
-            );
-            let recommendation_events = vec![(inbox_item.id, recommendations_event)];
-            if let Some(work_generated_event) = update_ingress_status(
-                &mut state,
-                inbox_item.id,
-                "work_generated",
-                format!("Created Work Item {}", work_item.id),
-            ) {
-                status_updates.push((inbox_item.id, work_generated_event));
-            }
-
-            (work_item, true, status_updates, recommendation_events)
         }
     };
 
@@ -2706,53 +2669,32 @@ async fn postmark_inbound(
         let mut state = lock_state(&data);
         let tenant_id = DEFAULT_TENANT_ID.to_string();
         ensure_tenant_exists(&mut state, &tenant_id);
-        let signal_event = create_signal_event(
+        let flow = runtime_flow::ingest_signal_to_inbox(
             &mut state,
-            tenant_id.clone(),
-            "email".to_string(),
-            default_signal_provenance("email"),
-            raw_payload,
-            content.clone(),
-            SignalMetadata {
-                sender,
-                timestamp: Utc::now().timestamp(),
-                channel: Some("postmark".to_string()),
+            &data.event_bus,
+            runtime_flow::SignalIngestionInput {
+                tenant_id,
+                source_type: "email".to_string(),
+                inbox_source: Some(source),
+                provenance: default_signal_provenance("email"),
+                raw_payload,
+                normalized_content: content,
+                metadata: SignalMetadata {
+                    sender,
+                    timestamp: Utc::now().timestamp(),
+                    channel: Some("postmark".to_string()),
+                },
             },
         );
-        let inbox_item = create_inbox_item(&mut state, tenant_id, source, content);
-        let work_item = create_work_item(&mut state, &inbox_item);
-        let mut status_updates = Vec::new();
-        if let Some(classified_event) = update_ingress_status(
-            &mut state,
-            inbox_item.id,
-            "classified",
-            format!("Classification: {}", work_item.title),
-        ) {
-            status_updates.push((inbox_item.id, classified_event));
-        }
-        let recommendations_event = create_ingress_event(
-            &mut state,
-            inbox_item.id,
-            inbox_item.tenant_id.clone(),
-            "recommendations_generated".to_string(),
-            format!(
-                "Generated {} recommended actions",
-                work_item.recommended_actions.len()
-            ),
-        );
-        if let Some(work_generated_event) = update_ingress_status(
-            &mut state,
-            inbox_item.id,
-            "work_generated",
-            format!("Created Work Item {}", work_item.id),
-        ) {
-            status_updates.push((inbox_item.id, work_generated_event));
-        }
-        let received_event = state
-            .ingress_events
-            .iter()
-            .find(|event| event.ingress_id == inbox_item.id && event.event_type == "received")
-            .cloned();
+        let signal_event = flow.signal_event;
+        let inbox_item = flow.inbox_item;
+        let received_event = flow.received_event;
+        let work_flow =
+            runtime_flow::extract_work_from_inbox(&mut state, &data.event_bus, inbox_item.id)
+                .expect("work extraction should succeed for newly ingested inbox item");
+        let work_item = work_flow.work_item;
+        let status_updates = work_flow.status_updates;
+        let recommendations_event = work_flow.recommendation_events[0].1.clone();
         (
             signal_event,
             inbox_item,
@@ -3529,6 +3471,7 @@ async fn execute_action(
 
     let mut state = lock_state(&data);
     state.execution_results.push(execution.clone());
+    runtime_flow::emit_action_executed_event(&data.event_bus, &tenant_id, execution.id, action.id);
     refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
     HttpResponse::Created().json(execution)
 }
