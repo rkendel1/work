@@ -14,7 +14,6 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkJsUrl = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js";
   const clerkConfigured = Boolean(
     clerkPublishableKey &&
       !clerkPublishableKey.includes("replace-with") &&
@@ -26,7 +25,7 @@ export default function RootLayout({
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
         {clerkConfigured ? (
-          <ClerkProvider publishableKey={clerkPublishableKey} clerkJSUrl={clerkJsUrl}>
+          <ClerkProvider publishableKey={clerkPublishableKey}>
             <Providers>{children}</Providers>
           </ClerkProvider>
         ) : (
