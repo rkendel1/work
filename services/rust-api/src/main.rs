@@ -644,6 +644,12 @@ struct ConvexConfig {
     admin_key: Option<String>,
 }
 
+impl ConvexConfig {
+    fn is_connected(&self) -> bool {
+        self.deployment_url.is_some() && self.admin_key.is_some()
+    }
+}
+
 struct AppState {
     state: Mutex<State>,
     convex_config: ConvexConfig,
@@ -2355,7 +2361,18 @@ async fn forward_tenant_bootstrap_to_convex(
     }
 }
 
-async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) -> impl Responder {
+async fn ingest(data: web::Data<AppState>, payload: web::Bytes) -> impl Responder {
+    let request = match serde_json::from_slice::<IngestRequest>(&payload) {
+        Ok(request) => request,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "status": "error",
+                "reason": "invalid_ingest_payload",
+                "recoverable": true
+            }));
+        }
+    };
+
     let (signal_event, item, received_event) = {
         let mut state = lock_state(&data);
         let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
@@ -4676,8 +4693,38 @@ async fn health() -> impl Responder {
     }))
 }
 
+async fn status(data: web::Data<AppState>) -> impl Responder {
+    let convex_connected = data.convex_config.is_connected();
+    HttpResponse::Ok().json(serde_json::json!({
+        "service": "rust-api",
+        "reachable": true,
+        "mode": if convex_connected { "connected" } else { "standalone" },
+        "convex": if convex_connected { "connected" } else { "missing" }
+    }))
+}
+
+async fn ingest_contract() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "error",
+        "reason": "method_not_supported",
+        "recoverable": true,
+        "expected_method": "POST"
+    }))
+}
+
+async fn simulate() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok",
+        "mode": "stub",
+        "simulation_id": Uuid::new_v4().to_string()
+    }))
+}
+
 fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(health))
+        .route("/status", web::get().to(status))
+        .route("/simulate", web::get().to(simulate))
+        .route("/ingest", web::get().to(ingest_contract))
         .route("/ingest", web::post().to(ingest))
         .route("/signals", web::post().to(ingest_signal))
         .route("/extract", web::post().to(extract))
@@ -4714,8 +4761,8 @@ fn load_convex_config() -> ConvexConfig {
             admin_key: Some(config.convex_admin_key),
         },
         Err(error) => {
-            eprintln!(
-                "Convex integration disabled: {error}. Set CONVEX_URL and CONVEX_ADMIN_KEY (for Fly: `fly secrets set CONVEX_URL=... CONVEX_ADMIN_KEY=... -a <app>`)."
+            log::warn!(
+                "Convex not configured - running in standalone mode ({error}). Set CONVEX_URL and CONVEX_ADMIN_KEY (for Fly: `fly secrets set CONVEX_URL=... CONVEX_ADMIN_KEY=... -a <app>`)."
             );
             ConvexConfig::default()
         }
@@ -4756,6 +4803,13 @@ mod tests {
         web::Data::new(AppState::new(ConvexConfig::default()))
     }
 
+    fn connected_test_state() -> web::Data<AppState> {
+        web::Data::new(AppState::new(ConvexConfig {
+            deployment_url: Some("https://example.convex.cloud".to_string()),
+            admin_key: Some("admin-key".to_string()),
+        }))
+    }
+
     #[actix_web::test]
     async fn health_endpoint_returns_service_status() {
         let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
@@ -4765,6 +4819,77 @@ mod tests {
 
         assert_eq!(response["status"], "healthy");
         assert_eq!(response["service"], "rust-api");
+    }
+
+    #[actix_web::test]
+    async fn status_endpoint_reports_standalone_mode_without_convex() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let req = test::TestRequest::get().uri("/status").to_request();
+        let response: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(response["service"], "rust-api");
+        assert_eq!(response["reachable"], true);
+        assert_eq!(response["mode"], "standalone");
+        assert_eq!(response["convex"], "missing");
+    }
+
+    #[actix_web::test]
+    async fn status_endpoint_reports_connected_mode_with_convex() {
+        let app = test::init_service(
+            App::new()
+                .app_data(connected_test_state())
+                .configure(app_config),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/status").to_request();
+        let response: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(response["mode"], "connected");
+        assert_eq!(response["convex"], "connected");
+    }
+
+    #[actix_web::test]
+    async fn ingest_get_returns_structured_contract_response() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let req = test::TestRequest::get().uri("/ingest").to_request();
+        let response: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["reason"], "method_not_supported");
+        assert_eq!(response["recoverable"], true);
+        assert_eq!(response["expected_method"], "POST");
+    }
+
+    #[actix_web::test]
+    async fn ingest_invalid_payload_returns_structured_bad_request_not_500() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_payload("not-json")
+            .to_request();
+        let response = test::call_service(&app, req).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["reason"], "invalid_ingest_payload");
+        assert_eq!(body["recoverable"], true);
+    }
+
+    #[actix_web::test]
+    async fn simulate_endpoint_returns_stubbed_payload() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let req = test::TestRequest::get().uri("/simulate").to_request();
+        let response: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["mode"], "stub");
+        assert!(response["simulation_id"].as_str().is_some());
     }
 
     #[actix_web::test]
