@@ -4469,11 +4469,17 @@ fn app_config(cfg: &mut web::ServiceConfig) {
 }
 
 fn load_convex_config() -> ConvexConfig {
-    let config = Config::from_env();
-
-    ConvexConfig {
-        deployment_url: Some(config.convex_url),
-        admin_key: Some(config.convex_admin_key),
+    match Config::from_env() {
+        Ok(config) => ConvexConfig {
+            deployment_url: Some(config.convex_url),
+            admin_key: Some(config.convex_admin_key),
+        },
+        Err(error) => {
+            eprintln!(
+                "Convex integration disabled: {error}. Set CONVEX_URL and CONVEX_ADMIN_KEY (for Fly: `fly secrets set CONVEX_URL=... CONVEX_ADMIN_KEY=... -a <app>`)."
+            );
+            ConvexConfig::default()
+        }
     }
 }
 
