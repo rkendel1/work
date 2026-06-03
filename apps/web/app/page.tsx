@@ -30,13 +30,13 @@ export default async function Home() {
     return (
       <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center gap-8 px-6 py-20">
         <section className="space-y-4">
-          <p className="text-sm font-medium uppercase tracking-wide text-zinc-600">
+          <p className="text-sm font-medium uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
             Canonflo Operations
           </p>
           <h1 className="text-4xl font-semibold">
             See your operations in real time from your first signal.
           </h1>
-          <ul className="list-disc space-y-1 pl-5 text-zinc-700">
+          <ul className="list-disc space-y-1 pl-5 text-zinc-700 dark:text-zinc-300">
             <li>connect inbox</li>
             <li>forward email</li>
             <li>ingest webhook</li>
@@ -46,7 +46,7 @@ export default async function Home() {
         <section className="flex flex-wrap gap-3">
           <Link
             href="/sign-up"
-            className="rounded bg-zinc-900 px-4 py-2 font-medium text-white"
+            className="rounded bg-zinc-900 px-4 py-2 font-medium text-white dark:bg-zinc-100 dark:text-zinc-900"
           >
             Sign up
           </Link>
