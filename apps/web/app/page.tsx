@@ -1,6 +1,6 @@
 import { InboxClient, InboxItem, WorkItem } from "@/app/inbox-client";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
-import { isRootHost } from "@/lib/tenant-routing";
+import { tenantSlugFromHost } from "@/lib/tenant-routing";
 import Link from "next/link";
 import { headers } from "next/headers";
 
@@ -26,7 +26,7 @@ export default async function Home() {
   const host = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
   const tenantId = headerStore.get("x-tenant-id") ?? undefined;
 
-  if (isRootHost(host)) {
+  if (!tenantSlugFromHost(host)) {
     return (
       <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center gap-8 px-6 py-20">
         <section className="space-y-4">
