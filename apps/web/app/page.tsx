@@ -48,7 +48,7 @@ export default async function Home() {
             href="/sign-up"
             className="rounded bg-zinc-900 px-4 py-2 font-medium text-white"
           >
-            Create Tenant
+            Sign up
           </Link>
           <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2">
             Run Simulation
