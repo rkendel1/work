@@ -85,6 +85,24 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_type", ["tenantId", "type"]),
+  term_mappings: defineTable({
+    tenantId: v.string(),
+    systemTerm: v.string(),
+    tenantTerm: v.string(),
+    type: v.string(),
+    confidence: v.optional(v.number()),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_system_term_type", ["tenantId", "systemTerm", "type"])
+    .index("by_tenant_tenant_term_type", ["tenantId", "tenantTerm", "type"]),
+  action_mappings: defineTable({
+    tenantId: v.string(),
+    systemAction: v.string(),
+    tenantAction: v.string(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_system_action", ["tenantId", "systemAction"])
+    .index("by_tenant_tenant_action", ["tenantId", "tenantAction"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),

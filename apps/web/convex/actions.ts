@@ -124,6 +124,14 @@ function normalizeOperationalKey(value: string) {
   return value.trim().toLowerCase();
 }
 
+function labelFromSystemTerm(systemTerm: string) {
+  return systemTerm
+    .split("_")
+    .filter(Boolean)
+    .map((segment) => `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`)
+    .join(" ");
+}
+
 function loadOperationalPack(vertical: string, industry: string): OperationalPack {
   const verticalKey = normalizeOperationalKey(vertical);
   const industryKey = normalizeOperationalKey(industry);
@@ -196,6 +204,24 @@ export const createTenant = mutationGeneric({
           description: classification.description,
         });
       }
+
+      const existingTermMapping = await ctx.db
+        .query("term_mappings")
+        .withIndex("by_tenant_system_term_type", (query) =>
+          query.eq("tenantId", args.id),
+        )
+        .filter((query) => query.eq(query.field("systemTerm"), classification.type))
+        .filter((query) => query.eq(query.field("type"), "classification"))
+        .first();
+      if (!existingTermMapping) {
+        await ctx.db.insert("term_mappings", {
+          tenantId: args.id,
+          systemTerm: classification.type,
+          tenantTerm: labelFromSystemTerm(classification.type),
+          type: "classification",
+          confidence: 1,
+        });
+      }
     }
     for (const action of pack.actions) {
       const existing = await ctx.db
@@ -211,6 +237,21 @@ export const createTenant = mutationGeneric({
           category: "pack",
           classificationTypes: action.classificationTypes,
           active: true,
+        });
+      }
+
+      const existingActionMapping = await ctx.db
+        .query("action_mappings")
+        .withIndex("by_tenant_system_action", (query) =>
+          query.eq("tenantId", args.id),
+        )
+        .filter((query) => query.eq(query.field("systemAction"), action.name))
+        .first();
+      if (!existingActionMapping) {
+        await ctx.db.insert("action_mappings", {
+          tenantId: args.id,
+          systemAction: action.name,
+          tenantAction: action.name,
         });
       }
     }
@@ -235,7 +276,22 @@ export const createAction = mutationGeneric({
     active: v.boolean(),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.insert("actions", args);
+    const actionId = await ctx.db.insert("actions", args);
+    const existingActionMapping = await ctx.db
+      .query("action_mappings")
+      .withIndex("by_tenant_system_action", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("systemAction"), args.name))
+      .first();
+    if (!existingActionMapping) {
+      await ctx.db.insert("action_mappings", {
+        tenantId: args.tenantId,
+        systemAction: args.name,
+        tenantAction: args.name,
+      });
+    }
+    return actionId;
   },
 });
 
@@ -304,6 +360,22 @@ export const bootstrapTenantFromPack = mutationGeneric({
           description: classification.description,
         });
       }
+
+      const existingTermMapping = await ctx.db
+        .query("term_mappings")
+        .withIndex("by_tenant_system_term_type", (query) => query.eq("tenantId", args.tenantId))
+        .filter((query) => query.eq(query.field("systemTerm"), classification.type))
+        .filter((query) => query.eq(query.field("type"), "classification"))
+        .first();
+      if (!existingTermMapping) {
+        await ctx.db.insert("term_mappings", {
+          tenantId: args.tenantId,
+          systemTerm: classification.type,
+          tenantTerm: labelFromSystemTerm(classification.type),
+          type: "classification",
+          confidence: 1,
+        });
+      }
     }
 
     for (const action of pack.actions) {
@@ -322,8 +394,101 @@ export const bootstrapTenantFromPack = mutationGeneric({
           active: true,
         });
       }
+
+      const existingActionMapping = await ctx.db
+        .query("action_mappings")
+        .withIndex("by_tenant_system_action", (query) =>
+          query.eq("tenantId", args.tenantId),
+        )
+        .filter((query) => query.eq(query.field("systemAction"), action.name))
+        .first();
+      if (!existingActionMapping) {
+        await ctx.db.insert("action_mappings", {
+          tenantId: args.tenantId,
+          systemAction: action.name,
+          tenantAction: action.name,
+        });
+      }
     }
 
     return pack;
+  },
+});
+
+export const upsertTermMapping = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    systemTerm: v.string(),
+    tenantTerm: v.string(),
+    type: v.string(),
+    confidence: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("term_mappings")
+      .withIndex("by_tenant_system_term_type", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("systemTerm"), args.systemTerm))
+      .filter((query) => query.eq(query.field("type"), args.type))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        tenantTerm: args.tenantTerm,
+        confidence: args.confidence,
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("term_mappings", args);
+  },
+});
+
+export const listTermMappings = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("term_mappings")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .collect();
+  },
+});
+
+export const upsertActionMapping = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    systemAction: v.string(),
+    tenantAction: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("action_mappings")
+      .withIndex("by_tenant_system_action", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("systemAction"), args.systemAction))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        tenantAction: args.tenantAction,
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("action_mappings", args);
+  },
+});
+
+export const listActionMappings = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("action_mappings")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .collect();
   },
 });
