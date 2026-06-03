@@ -7,9 +7,15 @@ type SignalMetadata = {
   channel?: string;
 };
 
+type SignalProvenance = {
+  origin: "real" | "synthetic" | "mixed";
+  generatedBy: "user" | "system" | "scenario_engine";
+};
+
 type IngestInput = {
   tenantId: string;
   sourceType: string;
+  provenance?: SignalProvenance;
   rawPayload: unknown;
   normalizedContent?: string;
   metadata?: SignalMetadata;
@@ -62,6 +68,19 @@ function convexClient() {
   return new ConvexHttpClient(url);
 }
 
+function defaultProvenance(sourceType: string): SignalProvenance {
+  if (sourceType === "simulation") {
+    return { origin: "synthetic", generatedBy: "scenario_engine" };
+  }
+  if (sourceType === "replay") {
+    return { origin: "mixed", generatedBy: "system" };
+  }
+  if (sourceType === "email" || sourceType === "webhook" || sourceType === "api") {
+    return { origin: "real", generatedBy: "user" };
+  }
+  return { origin: "real", generatedBy: "system" };
+}
+
 export async function ingestSignalWithWasm(input: IngestInput) {
   const normalizedContent = normalizeSignalContent(input.rawPayload, input.normalizedContent);
   if (!normalizedContent) {
@@ -74,6 +93,7 @@ export async function ingestSignalWithWasm(input: IngestInput) {
     timestamp: metadataTimestamp,
     channel: input.metadata?.channel,
   };
+  const provenance = input.provenance ?? defaultProvenance(input.sourceType);
 
   const wasm = await loadWasm();
   const result = JSON.parse(
@@ -102,6 +122,7 @@ export async function ingestSignalWithWasm(input: IngestInput) {
   await mutation("inbox:createSignalEvent", {
     tenantId: input.tenantId,
     sourceType: input.sourceType,
+    provenance,
     rawPayload: input.rawPayload,
     normalizedContent,
     metadata,

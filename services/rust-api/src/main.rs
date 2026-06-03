@@ -45,9 +45,17 @@ struct SignalEvent {
     id: Uuid,
     tenant_id: String,
     source_type: String,
+    provenance: SignalProvenance,
     raw_payload: Value,
     normalized_content: String,
     metadata: SignalMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignalProvenance {
+    origin: String,
+    generated_by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +215,7 @@ struct IngestRequest {
 #[serde(rename_all = "camelCase")]
 struct SignalIngestRequest {
     source_type: Option<String>,
+    provenance: Option<SignalProvenanceInput>,
     raw_payload: Option<Value>,
     normalized_content: Option<String>,
     metadata: Option<SignalMetadataInput>,
@@ -219,6 +228,13 @@ struct SignalMetadataInput {
     sender: Option<String>,
     timestamp: Option<i64>,
     channel: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignalProvenanceInput {
+    origin: Option<String>,
+    generated_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1678,6 +1694,7 @@ fn create_signal_event(
     state: &mut State,
     tenant_id: String,
     source_type: String,
+    provenance: SignalProvenance,
     raw_payload: Value,
     normalized_content: String,
     metadata: SignalMetadata,
@@ -1686,6 +1703,7 @@ fn create_signal_event(
         id: Uuid::new_v4(),
         tenant_id,
         source_type,
+        provenance,
         raw_payload,
         normalized_content,
         metadata,
@@ -1721,6 +1739,27 @@ fn create_inbox_item(
         format!("Received via {}", item.source),
     );
     item
+}
+
+fn default_signal_provenance(source_type: &str) -> SignalProvenance {
+    match source_type {
+        "simulation" => SignalProvenance {
+            origin: "synthetic".to_string(),
+            generated_by: "scenario_engine".to_string(),
+        },
+        "replay" => SignalProvenance {
+            origin: "mixed".to_string(),
+            generated_by: "system".to_string(),
+        },
+        "email" | "webhook" | "api" => SignalProvenance {
+            origin: "real".to_string(),
+            generated_by: "user".to_string(),
+        },
+        _ => SignalProvenance {
+            origin: "real".to_string(),
+            generated_by: "system".to_string(),
+        },
+    }
 }
 
 fn create_ingress_event(
@@ -1923,9 +1962,17 @@ struct ConvexInboxArgs {
 struct ConvexSignalEventArgs {
     tenant_id: String,
     source_type: String,
+    provenance: ConvexSignalProvenanceArgs,
     raw_payload: Value,
     normalized_content: String,
     metadata: ConvexSignalMetadataArgs,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexSignalProvenanceArgs {
+    origin: String,
+    generated_by: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2113,6 +2160,10 @@ async fn forward_signal_event_to_convex(
         ConvexSignalEventArgs {
             tenant_id: signal_event.tenant_id.clone(),
             source_type: signal_event.source_type.clone(),
+            provenance: ConvexSignalProvenanceArgs {
+                origin: signal_event.provenance.origin.clone(),
+                generated_by: signal_event.provenance.generated_by.clone(),
+            },
             raw_payload: signal_event.raw_payload.clone(),
             normalized_content: signal_event.normalized_content.clone(),
             metadata: ConvexSignalMetadataArgs {
@@ -2318,6 +2369,7 @@ async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) ->
             &mut state,
             tenant_id.clone(),
             request.source.clone(),
+            default_signal_provenance(&request.source),
             raw_payload,
             normalized_content.clone(),
             SignalMetadata {
@@ -2382,6 +2434,25 @@ async fn ingest_signal(
         .as_ref()
         .and_then(|metadata| metadata.timestamp)
         .unwrap_or_else(|| Utc::now().timestamp());
+    let provenance_defaults = default_signal_provenance(&source_type);
+    let provenance = SignalProvenance {
+        origin: request
+            .provenance
+            .as_ref()
+            .and_then(|input| input.origin.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or(provenance_defaults.origin),
+        generated_by: request
+            .provenance
+            .as_ref()
+            .and_then(|input| input.generated_by.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or(provenance_defaults.generated_by),
+    };
     let metadata = SignalMetadata {
         sender: request
             .metadata
@@ -2402,6 +2473,7 @@ async fn ingest_signal(
             &mut state,
             tenant_id.clone(),
             source_type.clone(),
+            provenance,
             raw_payload,
             normalized_content.clone(),
             metadata,
@@ -2564,6 +2636,7 @@ async fn postmark_inbound(
             &mut state,
             tenant_id.clone(),
             "email".to_string(),
+            default_signal_provenance("email"),
             raw_payload,
             content.clone(),
             SignalMetadata {
@@ -2750,6 +2823,7 @@ async fn create_tenant(
             &mut state,
             id.clone(),
             "simulation".to_string(),
+            default_signal_provenance("simulation"),
             serde_json::json!({
                 "source": "simulation",
                 "content": content,
@@ -4702,6 +4776,21 @@ mod tests {
             .find(|tenant| tenant.id == DEFAULT_TENANT_ID)
             .expect("default tenant should exist");
         assert_eq!(default_tenant.domain, "www.canonflo.com");
+    }
+
+    #[actix_web::test]
+    async fn source_type_defaults_to_expected_provenance() {
+        let synthetic = default_signal_provenance("simulation");
+        assert_eq!(synthetic.origin, "synthetic");
+        assert_eq!(synthetic.generated_by, "scenario_engine");
+
+        let replay = default_signal_provenance("replay");
+        assert_eq!(replay.origin, "mixed");
+        assert_eq!(replay.generated_by, "system");
+
+        let real = default_signal_provenance("webhook");
+        assert_eq!(real.origin, "real");
+        assert_eq!(real.generated_by, "user");
     }
 
     #[actix_web::test]
