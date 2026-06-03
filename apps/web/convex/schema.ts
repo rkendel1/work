@@ -103,6 +103,18 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_name", ["tenantId", "name"]),
+  business_rules: defineTable({
+    tenantId: v.string(),
+    orgUnitId: v.optional(v.id("org_units")),
+    title: v.string(),
+    ruleText: v.string(),
+    scope: v.string(),
+    active: v.boolean(),
+    priority: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_scope", ["tenantId", "scope"])
+    .index("by_tenant_org_unit", ["tenantId", "orgUnitId"]),
   tenant_classifications: defineTable({
     tenantId: v.string(),
     type: v.string(),

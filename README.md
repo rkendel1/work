@@ -54,6 +54,8 @@ Convex operational state
 - `DELETE /vault/keys`
 - `GET /org/units`
 - `POST /org/units`
+- `GET /business-rules`
+- `POST /business-rules`
 
 ## Convex Data Model
 
@@ -69,6 +71,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `tenant_secrets`
 - `actions`
 - `org_units`
+- `business_rules`
 - `users`
 - `tenants`
 

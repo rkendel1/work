@@ -70,11 +70,24 @@ struct WorkItem {
     classification_type: String,
     title: String,
     summary: String,
+    priority: String,
     status: String,
     assigned_org_unit_id: Uuid,
     current_owner_id: Option<String>,
     routing_path: Vec<Uuid>,
+    escalation_target: Option<String>,
+    suppress_action: bool,
+    require_approval: bool,
+    applied_rules: Vec<AppliedBusinessRule>,
     recommended_actions: Vec<RecommendedAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppliedBusinessRule {
+    rule_id: Uuid,
+    title: String,
+    scope: String,
+    effect_summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +242,18 @@ struct ActionExecution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct BusinessRule {
+    id: Uuid,
+    tenant_id: String,
+    org_unit_id: Option<Uuid>,
+    title: String,
+    rule_text: String,
+    scope: String,
+    active: bool,
+    priority: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClassificationDefinition {
     tenant_id: String,
     #[serde(rename = "type")]
@@ -291,12 +316,33 @@ struct CreateOrgUnitRequest {
     metadata: Option<Value>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateBusinessRuleRequest {
+    tenant_id: Option<String>,
+    org_unit_id: Option<Uuid>,
+    title: String,
+    rule_text: String,
+    scope: String,
+    active: Option<bool>,
+    priority: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BusinessRulesQuery {
+    tenant_id: Option<String>,
+    org_unit_id: Option<Uuid>,
+    scope: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RoutingPreviewQuery {
     tenant_id: Option<String>,
     classification_type: Option<String>,
     action_name: Option<String>,
+    signal_content: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -307,6 +353,11 @@ struct WorkRoutingPreview {
     action_name: Option<String>,
     assigned_org_unit: Option<OrgUnit>,
     routing_path: Vec<OrgUnit>,
+    priority: String,
+    escalation_target: Option<String>,
+    suppress_action: bool,
+    require_approval: bool,
+    applied_rules: Vec<AppliedBusinessRule>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -399,6 +450,7 @@ struct State {
     work_items: Vec<WorkItem>,
     tenants: Vec<Tenant>,
     org_units: Vec<OrgUnit>,
+    business_rules: Vec<BusinessRule>,
     actions: Vec<ActionDefinition>,
     classifications: Vec<ClassificationDefinition>,
     action_selections: Vec<ActionSelection>,
@@ -432,6 +484,7 @@ impl Default for State {
             work_items: Vec::new(),
             tenants: vec![default_tenant],
             org_units,
+            business_rules: Vec::new(),
             actions,
             classifications,
             action_selections: Vec::new(),
@@ -1189,6 +1242,225 @@ fn route_work_item(
     )
 }
 
+struct RuleEvaluationContext<'a> {
+    content: &'a str,
+    classification_type: &'a str,
+    recommended_actions: &'a [RecommendedAction],
+    assigned_org_unit_id: Uuid,
+}
+
+#[derive(Default)]
+struct RuleEffect {
+    override_priority: Option<String>,
+    override_org_unit_id: Option<Uuid>,
+    escalation_target: Option<String>,
+    suppress_action: bool,
+    require_approval: bool,
+}
+
+fn extract_rule_keywords(rule_text: &str) -> Vec<String> {
+    let mut keywords = Vec::new();
+    let mut active_quote: Option<char> = None;
+    let mut current = String::new();
+    for character in rule_text.chars() {
+        if active_quote.is_none() && (character == '"' || character == '\'') {
+            active_quote = Some(character);
+            current.clear();
+            continue;
+        }
+        if active_quote == Some(character) {
+            let keyword = current.trim().to_lowercase();
+            if !keyword.is_empty() {
+                keywords.push(keyword);
+            }
+            active_quote = None;
+            current.clear();
+            continue;
+        }
+        if active_quote.is_some() {
+            current.push(character);
+        }
+    }
+    keywords
+}
+
+fn parse_priority_override(rule_text_lower: &str) -> Option<String> {
+    if rule_text_lower.contains("priority = high") || rule_text_lower.contains("high priority") {
+        return Some("high".to_string());
+    }
+    if rule_text_lower.contains("priority = low") || rule_text_lower.contains("low priority") {
+        return Some("low".to_string());
+    }
+    if rule_text_lower.contains("priority = medium") || rule_text_lower.contains("medium priority") {
+        return Some("medium".to_string());
+    }
+    None
+}
+
+fn evaluate_rule(rule_text: &str, context: &RuleEvaluationContext<'_>, state: &State) -> RuleEffect {
+    let rule_text_lower = rule_text.to_lowercase();
+    let content_lower = context.content.to_lowercase();
+    let classification_lower = context.classification_type.to_lowercase();
+    let recommendation_titles = context
+        .recommended_actions
+        .iter()
+        .map(|action| action.title.to_lowercase())
+        .collect::<Vec<String>>();
+
+    let keywords = extract_rule_keywords(rule_text);
+    if !keywords.is_empty()
+        && !keywords.iter().any(|keyword| {
+            content_lower.contains(keyword)
+                || classification_lower.contains(keyword)
+                || recommendation_titles
+                    .iter()
+                    .any(|title| title.contains(keyword))
+        })
+    {
+        return RuleEffect::default();
+    }
+
+    let mut effect = RuleEffect {
+        override_priority: parse_priority_override(&rule_text_lower),
+        ..RuleEffect::default()
+    };
+
+    for org_unit in &state.org_units {
+        let org_name_lower = org_unit.name.to_lowercase();
+        if rule_text_lower.contains(&format!("escalate to {}", org_name_lower))
+            || rule_text_lower.contains(&format!("escalate to the {}", org_name_lower))
+        {
+            effect.escalation_target = Some(org_unit.name.clone());
+        }
+        if (rule_text_lower.contains("route to")
+            || rule_text_lower.contains("go to")
+            || rule_text_lower.contains("assign to")
+            || rule_text_lower.contains("override org unit ="))
+            && rule_text_lower.contains(&org_name_lower)
+        {
+            effect.override_org_unit_id = Some(org_unit.id);
+        }
+        if rule_text_lower.contains("reviewed by")
+            && rule_text_lower.contains(&org_name_lower)
+            && context.assigned_org_unit_id != org_unit.id
+        {
+            effect.require_approval = true;
+            effect.escalation_target = Some(org_unit.name.clone());
+        }
+    }
+
+    if (rule_text_lower.contains("do not") || rule_text_lower.contains("don't"))
+        && (rule_text_lower.contains("dispatch")
+            || recommendation_titles
+                .iter()
+                .any(|title| title.contains("dispatch")))
+    {
+        effect.suppress_action = true;
+    }
+    if rule_text_lower.contains("require approval")
+        || rule_text_lower.contains("must be reviewed")
+        || rule_text_lower.contains("review before execution")
+    {
+        effect.require_approval = true;
+    }
+
+    effect
+}
+
+fn apply_business_rules(
+    state: &State,
+    tenant_id: &str,
+    context: &RuleEvaluationContext<'_>,
+) -> (
+    Option<String>,
+    Option<Uuid>,
+    Option<String>,
+    bool,
+    bool,
+    Vec<AppliedBusinessRule>,
+) {
+    let mut override_priority: Option<String> = None;
+    let mut override_org_unit_id: Option<Uuid> = None;
+    let mut escalation_target: Option<String> = None;
+    let mut suppress_action = false;
+    let mut require_approval = false;
+    let mut applied_rules = Vec::new();
+
+    let mut rules: Vec<BusinessRule> = state
+        .business_rules
+        .iter()
+        .filter(|rule| {
+            rule.tenant_id == tenant_id
+                && rule.active
+                && (rule.org_unit_id.is_none() || rule.org_unit_id == Some(context.assigned_org_unit_id))
+        })
+        .cloned()
+        .collect();
+    rules.sort_by(|left, right| right.priority.cmp(&left.priority).then(left.id.cmp(&right.id)));
+
+    for rule in rules {
+        let effect = evaluate_rule(&rule.rule_text, context, state);
+        let has_effect = effect.override_priority.is_some()
+            || effect.override_org_unit_id.is_some()
+            || effect.escalation_target.is_some()
+            || effect.suppress_action
+            || effect.require_approval;
+        if !has_effect {
+            continue;
+        }
+        if let Some(priority) = effect.override_priority {
+            override_priority = Some(priority);
+        }
+        if let Some(org_unit_id) = effect.override_org_unit_id {
+            override_org_unit_id = Some(org_unit_id);
+        }
+        if let Some(target) = effect.escalation_target {
+            escalation_target = Some(target);
+        }
+        if effect.suppress_action {
+            suppress_action = true;
+        }
+        if effect.require_approval {
+            require_approval = true;
+        }
+
+        let mut effect_parts = Vec::new();
+        if let Some(priority) = override_priority.as_deref() {
+            effect_parts.push(format!("priority={priority}"));
+        }
+        if let Some(org_unit_id) = override_org_unit_id {
+            if let Some(org_unit) = state.org_units.iter().find(|item| item.id == org_unit_id) {
+                effect_parts.push(format!("org_unit={}", org_unit.name));
+            }
+        }
+        if let Some(target) = escalation_target.as_deref() {
+            effect_parts.push(format!("escalation={target}"));
+        }
+        if suppress_action {
+            effect_parts.push("suppress_action=true".to_string());
+        }
+        if require_approval {
+            effect_parts.push("require_approval=true".to_string());
+        }
+
+        applied_rules.push(AppliedBusinessRule {
+            rule_id: rule.id,
+            title: rule.title,
+            scope: rule.scope,
+            effect_summary: effect_parts.join(", "),
+        });
+    }
+
+    (
+        override_priority,
+        override_org_unit_id,
+        escalation_target,
+        suppress_action,
+        require_approval,
+        applied_rules,
+    )
+}
+
 fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1332,6 +1604,26 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
         &classification_result.classification,
         &classification_result.recommendations,
     );
+    let rule_context = RuleEvaluationContext {
+        content: &inbox_item.content,
+        classification_type: &classification_result.classification,
+        recommended_actions: &classification_result.recommendations,
+        assigned_org_unit_id,
+    };
+    let (
+        priority_override,
+        assigned_org_unit_override,
+        escalation_target,
+        suppress_action,
+        require_approval,
+        applied_rules,
+    ) = apply_business_rules(state, &inbox_item.tenant_id, &rule_context);
+    let final_assigned_org_unit_id = assigned_org_unit_override.unwrap_or(assigned_org_unit_id);
+    let final_routing_path = if final_assigned_org_unit_id == assigned_org_unit_id {
+        routing_path
+    } else {
+        build_routing_path(state, final_assigned_org_unit_id)
+    };
     let work_item = WorkItem {
         id: Uuid::new_v4(),
         tenant_id: inbox_item.tenant_id.clone(),
@@ -1339,10 +1631,15 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
         classification_type: classification_result.classification.clone(),
         title: classification_title(&classification_result.classification).to_string(),
         summary: classification_result.reason.clone(),
+        priority: priority_override.unwrap_or_else(|| "medium".to_string()),
         status: "open".to_string(),
-        assigned_org_unit_id,
+        assigned_org_unit_id: final_assigned_org_unit_id,
         current_owner_id: None,
-        routing_path,
+        routing_path: final_routing_path,
+        escalation_target,
+        suppress_action,
+        require_approval,
+        applied_rules,
         recommended_actions: classification_result.recommendations.clone(),
     };
 
@@ -2245,6 +2542,86 @@ async fn create_org_unit(
     HttpResponse::Created().json(org_unit)
 }
 
+async fn list_business_rules(
+    data: web::Data<AppState>,
+    query: web::Query<BusinessRulesQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let scope_filter = query
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let state = lock_state(&data);
+    let mut rules: Vec<BusinessRule> = state
+        .business_rules
+        .iter()
+        .filter(|rule| rule.tenant_id == tenant_id)
+        .filter(|rule| {
+            if let Some(scope) = &scope_filter {
+                rule.scope == *scope
+            } else {
+                true
+            }
+        })
+        .filter(|rule| {
+            if let Some(org_unit_id) = query.org_unit_id {
+                rule.org_unit_id == Some(org_unit_id)
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    rules.sort_by(|left, right| right.priority.cmp(&left.priority).then(left.id.cmp(&right.id)));
+    HttpResponse::Ok().json(rules)
+}
+
+async fn create_business_rule(
+    data: web::Data<AppState>,
+    request: web::Json<CreateBusinessRuleRequest>,
+) -> impl Responder {
+    let title = request.title.trim();
+    let rule_text = request.rule_text.trim();
+    let scope = request.scope.trim().to_lowercase();
+    if title.is_empty() || rule_text.is_empty() || scope.is_empty() {
+        return HttpResponse::BadRequest().body("title, ruleText, and scope are required");
+    }
+    if !matches!(
+        scope.as_str(),
+        "routing" | "priority" | "escalation" | "execution" | "classification_override"
+    ) {
+        return HttpResponse::BadRequest()
+            .body("scope must be one of routing, priority, escalation, execution, classification_override");
+    }
+
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    ensure_tenant_exists(&mut state, &tenant_id);
+    if let Some(org_unit_id) = request.org_unit_id
+        && !state
+            .org_units
+            .iter()
+            .any(|org_unit| org_unit.id == org_unit_id && org_unit.tenant_id == tenant_id)
+    {
+        return HttpResponse::BadRequest().body("orgUnitId is invalid for tenant");
+    }
+
+    let business_rule = BusinessRule {
+        id: Uuid::new_v4(),
+        tenant_id,
+        org_unit_id: request.org_unit_id,
+        title: title.to_string(),
+        rule_text: rule_text.to_string(),
+        scope,
+        active: request.active.unwrap_or(true),
+        priority: request.priority.unwrap_or(100),
+    };
+    state.business_rules.push(business_rule.clone());
+    HttpResponse::Created().json(business_rule)
+}
+
 async fn create_action(
     data: web::Data<AppState>,
     request: web::Json<CreateActionRequest>,
@@ -2654,6 +3031,12 @@ async fn work_routing_preview(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let signal_content = query
+        .signal_content
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
 
     let state = lock_state(&data);
     let selected_action = if let Some(action_name) = action_name.as_deref() {
@@ -2672,13 +3055,48 @@ async fn work_routing_preview(
                     .any(|action_classification| action_classification == &classification_type)
         })
     };
-    let assigned_org_unit = selected_action.and_then(|action| {
+    let mut assigned_org_unit = selected_action.and_then(|action| {
         state
             .org_units
             .iter()
             .find(|org_unit| org_unit.id == action.assigned_org_unit_id)
             .cloned()
     });
+    let recommended_actions = action_name
+        .as_deref()
+        .map(|name| {
+            vec![RecommendedAction {
+                title: name.to_string(),
+                description: "Routing preview action".to_string(),
+                action_type: ActionType::Review,
+            }]
+        })
+        .unwrap_or_default();
+    let initial_assigned_org_unit_id = assigned_org_unit
+        .as_ref()
+        .map(|org_unit| org_unit.id)
+        .unwrap_or_else(Uuid::nil);
+    let rule_context = RuleEvaluationContext {
+        content: signal_content,
+        classification_type: &classification_type,
+        recommended_actions: &recommended_actions,
+        assigned_org_unit_id: initial_assigned_org_unit_id,
+    };
+    let (
+        priority_override,
+        assigned_org_unit_override,
+        escalation_target,
+        suppress_action,
+        require_approval,
+        applied_rules,
+    ) = apply_business_rules(&state, &tenant_id, &rule_context);
+    if let Some(override_org_unit_id) = assigned_org_unit_override {
+        assigned_org_unit = state
+            .org_units
+            .iter()
+            .find(|org_unit| org_unit.id == override_org_unit_id)
+            .cloned();
+    }
     let routing_path = assigned_org_unit
         .as_ref()
         .map(|org_unit| {
@@ -2701,6 +3119,11 @@ async fn work_routing_preview(
         action_name,
         assigned_org_unit,
         routing_path,
+        priority: priority_override.unwrap_or_else(|| "medium".to_string()),
+        escalation_target,
+        suppress_action,
+        require_approval,
+        applied_rules,
     })
 }
 
@@ -2896,6 +3319,8 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/tenants", web::post().to(create_tenant))
         .route("/org/units", web::get().to(list_org_units))
         .route("/org/units", web::post().to(create_org_unit))
+        .route("/business-rules", web::get().to(list_business_rules))
+        .route("/business-rules", web::post().to(create_business_rule))
         .route("/actions", web::get().to(list_actions))
         .route("/actions", web::post().to(create_action))
         .route("/actions/execute", web::post().to(execute_action))
@@ -3368,6 +3793,119 @@ mod tests {
         assert_eq!(preview.classification_type, "maintenance_request");
         assert!(preview.assigned_org_unit.is_some());
         assert!(!preview.routing_path.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn business_rules_modify_routing_priority_and_execution_requirements() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let org_units_req = test::TestRequest::get()
+            .uri("/org/units?tenantId=default")
+            .to_request();
+        let org_units: Vec<OrgUnit> = test::call_and_read_body_json(&app, org_units_req).await;
+        let maintenance_org_unit_id = org_units
+            .iter()
+            .find(|org_unit| org_unit.name.eq_ignore_ascii_case("maintenance"))
+            .map(|org_unit| org_unit.id)
+            .expect("maintenance org unit should exist");
+
+        let create_org_unit_req = test::TestRequest::post()
+            .uri("/org/units")
+            .set_json(&serde_json::json!({
+                "tenantId": "default",
+                "name": "Regional Manager",
+                "type": "role"
+            }))
+            .to_request();
+        let regional_manager: OrgUnit =
+            test::call_and_read_body_json(&app, create_org_unit_req).await;
+
+        let create_priority_rule_req = test::TestRequest::post()
+            .uri("/business-rules")
+            .set_json(&serde_json::json!({
+                "tenantId": "default",
+                "title": "No heat is high priority",
+                "ruleText": "If \"no heat\" then set priority = HIGH",
+                "scope": "priority",
+                "priority": 900
+            }))
+            .to_request();
+        let _: BusinessRule = test::call_and_read_body_json(&app, create_priority_rule_req).await;
+
+        let create_routing_rule_req = test::TestRequest::post()
+            .uri("/business-rules")
+            .set_json(&serde_json::json!({
+                "tenantId": "default",
+                "title": "Route no heat incidents to regional manager",
+                "ruleText": "If \"no heat\" route to Regional Manager",
+                "scope": "routing",
+                "priority": 800
+            }))
+            .to_request();
+        let _: BusinessRule = test::call_and_read_body_json(&app, create_routing_rule_req).await;
+
+        let create_execution_rule_req = test::TestRequest::post()
+            .uri("/business-rules")
+            .set_json(&serde_json::json!({
+                "tenantId": "default",
+                "title": "Maintenance items require approval",
+                "ruleText": "If \"no heat\" then require approval",
+                "scope": "execution",
+                "priority": 700
+            }))
+            .to_request();
+        let _: BusinessRule =
+            test::call_and_read_body_json(&app, create_execution_rule_req).await;
+        let create_scoped_rule_req = test::TestRequest::post()
+            .uri("/business-rules")
+            .set_json(&serde_json::json!({
+                "tenantId": "default",
+                "orgUnitId": maintenance_org_unit_id,
+                "title": "Maintenance scoped routing note",
+                "ruleText": "If \"hvac\" route to Operations",
+                "scope": "routing",
+                "priority": 600
+            }))
+            .to_request();
+        let scoped_rule: BusinessRule =
+            test::call_and_read_body_json(&app, create_scoped_rule_req).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "Tenant reports no heat in conference room",
+                "tenantId": "default"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        assert_eq!(work_item.priority, "high");
+        assert_eq!(work_item.assigned_org_unit_id, regional_manager.id);
+        assert!(work_item.require_approval);
+        assert!(!work_item.applied_rules.is_empty());
+
+        let scoped_rules_req = test::TestRequest::get()
+            .uri(&format!(
+                "/business-rules?tenantId=default&orgUnitId={}",
+                maintenance_org_unit_id
+            ))
+            .to_request();
+        let scoped_rules: Vec<BusinessRule> =
+            test::call_and_read_body_json(&app, scoped_rules_req).await;
+        assert!(
+            scoped_rules
+                .iter()
+                .any(|rule| rule.id == scoped_rule.id)
+        );
     }
 
     #[actix_web::test]
