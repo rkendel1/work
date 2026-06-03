@@ -38,6 +38,10 @@ const SETUP_PACKS = [
 function tenantUrl(tenant: Tenant): string {
   const slug = normalizeTenantSlug(tenant.slug || tenant.id || "default") || "default";
   const current = new URL(window.location.href);
+  const explicitDomain = tenant.domain?.trim();
+  if (explicitDomain) {
+    return `${current.protocol}//${explicitDomain}/`;
+  }
   if (
     current.hostname === "localhost" ||
     current.hostname === "127.0.0.1" ||
@@ -48,7 +52,7 @@ function tenantUrl(tenant: Tenant): string {
     return `${current.protocol}//${localHost}${localPort}/`;
   }
 
-  const host = tenantDomainFromSlug(slug);
+  const host = tenantDomainFromSlug(slug, current.hostname);
   return `${current.protocol}//${host}/`;
 }
 
