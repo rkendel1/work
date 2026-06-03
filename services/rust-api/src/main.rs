@@ -17,7 +17,9 @@ use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 mod config;
+mod application;
 mod domain;
+mod infrastructure;
 mod recommendation_engine;
 pub(crate) mod routes;
 mod runtime_flow;
@@ -2434,52 +2436,8 @@ async fn ingest(data: web::Data<AppState>, payload: web::Bytes) -> impl Responde
         }
     };
 
-    let (signal_event, item, received_event) = {
-        let mut state = lock_state(&data);
-        let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
-        ensure_tenant_exists(&mut state, &tenant_id);
-        let raw_payload = serde_json::json!({
-            "source": request.source.clone(),
-            "content": request.content.clone(),
-        });
-        let normalized_content = normalize_signal_content(&raw_payload, Some(&request.content));
-        let flow = runtime_flow::ingest_signal_to_inbox(
-            &mut state,
-            &data.event_bus,
-            runtime_flow::SignalIngestionInput {
-                tenant_id,
-                source_type: request.source.clone(),
-                inbox_source: None,
-                provenance: default_signal_provenance(&request.source),
-                raw_payload,
-                normalized_content,
-                metadata: SignalMetadata {
-                    sender: None,
-                    timestamp: Utc::now().timestamp(),
-                    channel: None,
-                },
-            },
-        );
-        (flow.signal_event, flow.inbox_item, flow.received_event)
-    };
-
-    if let Err(error) =
-        forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
-    {
-        eprintln!("failed to forward signal event to convex: {error}");
-    }
-    if let Err(error) = forward_inbox_to_convex(&data.client, &data.convex_config, &item).await {
-        eprintln!("failed to forward inbox item to convex: {error}");
-    }
-    if let Some(event) = received_event {
-        if let Err(error) =
-            forward_ingress_event_to_convex(&data.client, &data.convex_config, item.id, &event)
-                .await
-        {
-            eprintln!("failed to forward ingress event to convex: {error}");
-        }
-    }
-
+    let ingestion_service = application::ingestion_service::IngestionService::new(data.clone());
+    let item = ingestion_service.ingest_raw(request).await;
     HttpResponse::Created().json(item)
 }
 
@@ -2972,8 +2930,8 @@ async fn create_tenant(
 }
 
 async fn list_tenants(data: web::Data<AppState>) -> impl Responder {
-    let state = lock_state(&data);
-    HttpResponse::Ok().json(&state.tenants)
+    let tenant_service = application::tenant_service::TenantService::new(data);
+    HttpResponse::Ok().json(tenant_service.list_tenants())
 }
 
 async fn list_org_units(
@@ -3183,49 +3141,8 @@ async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase);
-    let state = lock_state(&data);
-    let mut actions: Vec<ActionDefinition> = state
-        .actions
-        .iter()
-        .filter(|action| action.tenant_id == tenant_id)
-        .filter(|action| {
-            if let Some(classification_type) = &classification_type {
-                action
-                    .classification_types
-                    .iter()
-                    .any(|item| item == classification_type)
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect();
-
-    if actions.is_empty() {
-        if let Some(tenant) = state.tenants.iter().find(|tenant| tenant.id == tenant_id) {
-            let pack = load_pack(&tenant.vertical, &tenant.industry);
-            let tenant_org_units: Vec<OrgUnit> = state
-                .org_units
-                .iter()
-                .filter(|unit| unit.tenant_id == tenant_id)
-                .cloned()
-                .collect();
-            actions = actions_from_pack(&tenant_id, &pack, &tenant_org_units)
-                .into_iter()
-                .filter(|action| {
-                    if let Some(classification_type) = &classification_type {
-                        action
-                            .classification_types
-                            .iter()
-                            .any(|item| item == classification_type)
-                    } else {
-                        true
-                    }
-                })
-                .collect();
-        }
-    }
-
+    let action_service = application::action_service::ActionService::new(data);
+    let actions = action_service.list_actions(tenant_id, classification_type);
     HttpResponse::Ok().json(actions)
 }
 
@@ -3272,13 +3189,8 @@ async fn list_vault_keys(
     query: web::Query<TenantScopedQuery>,
 ) -> impl Responder {
     let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
-    let state = lock_state(&data);
-    let keys: Vec<TenantSecretSummary> = state
-        .tenant_secrets
-        .iter()
-        .filter(|secret| secret.tenant_id == tenant_id)
-        .map(tenant_secret_summary)
-        .collect();
+    let vault_service = application::vault_service::VaultService::new(data);
+    let keys = vault_service.list_keys(&tenant_id);
     HttpResponse::Ok().json(keys)
 }
 
@@ -4409,13 +4321,8 @@ async fn list_work(
     query: web::Query<TenantScopedQuery>,
 ) -> impl Responder {
     let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
-    let state = lock_state(&data);
-    let work_items: Vec<WorkItem> = state
-        .work_items
-        .iter()
-        .filter(|work_item| work_item.tenant_id == tenant_id)
-        .cloned()
-        .collect();
+    let work_service = application::work_service::WorkService::new(data);
+    let work_items = work_service.list_work(&tenant_id);
     HttpResponse::Ok().json(work_items)
 }
 
@@ -4443,94 +4350,9 @@ async fn work_routing_preview(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("");
-
-    let state = lock_state(&data);
-    let selected_action = if let Some(action_name) = action_name.as_deref() {
-        state.actions.iter().find(|action| {
-            action.tenant_id == tenant_id
-                && action.active
-                && action.name.eq_ignore_ascii_case(action_name)
-        })
-    } else {
-        state.actions.iter().find(|action| {
-            action.tenant_id == tenant_id
-                && action.active
-                && action
-                    .classification_types
-                    .iter()
-                    .any(|action_classification| action_classification == &classification_type)
-        })
-    };
-    let mut assigned_org_unit = selected_action.and_then(|action| {
-        state
-            .org_units
-            .iter()
-            .find(|org_unit| org_unit.id == action.assigned_org_unit_id)
-            .cloned()
-    });
-    let recommended_actions = action_name
-        .as_deref()
-        .map(|name| {
-            vec![RecommendedAction {
-                title: name.to_string(),
-                description: "Routing preview action".to_string(),
-                action_type: ActionType::Review,
-            }]
-        })
-        .unwrap_or_default();
-    let initial_assigned_org_unit_id = assigned_org_unit
-        .as_ref()
-        .map(|org_unit| org_unit.id)
-        .unwrap_or_else(Uuid::nil);
-    let rule_context = RuleEvaluationContext {
-        content: signal_content,
-        classification_type: &classification_type,
-        recommended_actions: &recommended_actions,
-        assigned_org_unit_id: initial_assigned_org_unit_id,
-    };
-    let (
-        priority_override,
-        assigned_org_unit_override,
-        escalation_target,
-        suppress_action,
-        require_approval,
-        applied_rules,
-    ) = apply_business_rules(&state, &tenant_id, &rule_context);
-    if let Some(override_org_unit_id) = assigned_org_unit_override {
-        assigned_org_unit = state
-            .org_units
-            .iter()
-            .find(|org_unit| org_unit.id == override_org_unit_id)
-            .cloned();
-    }
-    let routing_path = assigned_org_unit
-        .as_ref()
-        .map(|org_unit| {
-            build_routing_path(&state, org_unit.id)
-                .into_iter()
-                .filter_map(|org_unit_id| {
-                    state
-                        .org_units
-                        .iter()
-                        .find(|org_unit| org_unit.id == org_unit_id)
-                        .cloned()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    HttpResponse::Ok().json(WorkRoutingPreview {
-        tenant_id,
-        classification_type,
-        action_name,
-        assigned_org_unit,
-        routing_path,
-        priority: priority_override.unwrap_or_else(|| "medium".to_string()),
-        escalation_target,
-        suppress_action,
-        require_approval,
-        applied_rules,
-    })
+    let routing_service = application::routing_service::RoutingService::new(data);
+    let preview = routing_service.preview(tenant_id, classification_type, action_name, signal_content);
+    HttpResponse::Ok().json(preview)
 }
 
 async fn select_work_action(
