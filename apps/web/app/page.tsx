@@ -1,10 +1,26 @@
 import { InboxClient, InboxItem, WorkItem } from "@/app/inbox-client";
+import { SessionUserControls } from "@/components/session-user-controls";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+
+type Tenant = {
+  id?: string;
+  slug?: string;
+  name?: string;
+  display_name?: string;
+};
+
+function titleCaseFromSlug(value: string): string {
+  return value
+    .split(/[-_.\s]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
 
 async function fetchInitial<T>(path: string, tenantId?: string): Promise<T[]> {
   try {
@@ -20,6 +36,37 @@ async function fetchInitial<T>(path: string, tenantId?: string): Promise<T[]> {
     return (await response.json()) as T[];
   } catch {
     return [];
+  }
+}
+
+async function resolveTenantName(tenantId?: string, tenantSlug?: string | null): Promise<string> {
+  const fallbackSource = tenantSlug || tenantId || "default";
+  const fallbackName = titleCaseFromSlug(fallbackSource) || "Default Tenant";
+
+  try {
+    const response = await fetch(`${RUST_INGRESS_URL}/tenants`, { cache: "no-store" });
+    if (!response.ok) {
+      return fallbackName;
+    }
+
+    const tenants = (await response.json()) as Tenant[];
+    if (!Array.isArray(tenants) || tenants.length === 0) {
+      return fallbackName;
+    }
+
+    const matchingTenant = tenants.find((tenant) => {
+      if (tenantId && tenant.id === tenantId) {
+        return true;
+      }
+      if (tenantSlug && (tenant.slug === tenantSlug || tenant.id === tenantSlug)) {
+        return true;
+      }
+      return false;
+    });
+
+    return matchingTenant?.display_name || matchingTenant?.name || fallbackName;
+  } catch {
+    return fallbackName;
   }
 }
 
@@ -96,21 +143,39 @@ export default async function Home() {
     fetchInitial<InboxItem>("/items", tenantId),
     fetchInitial<WorkItem>("/work", tenantId),
   ]);
+  const tenantName = await resolveTenantName(tenantId, tenantSlug);
+  let userIdentifier: string | null = null;
+  if (clerkConfigured && !authBypassEnabled && userId) {
+    const user = await currentUser();
+    const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
+    userIdentifier =
+      user?.primaryEmailAddress?.emailAddress ??
+      (fullName || null) ??
+      user?.username ??
+      userId;
+  }
 
   return (
     <main className="space-y-4 p-4">
       <header className="rounded-lg border bg-white p-4 dark:bg-zinc-800 dark:border-zinc-700">
         <h1 className="text-2xl font-semibold">Live Operations Stream</h1>
+        <p className="text-sm font-medium uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
+          Tenant: {tenantName}
+        </p>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           Tenant-scoped continuous operational stream with meaning and action layers.
         </p>
-        <div className="mt-3 flex gap-3 text-sm">
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
           <Link href="/simulate" className="underline dark:text-zinc-300">
             Scenario Injection
           </Link>
-          <Link href="/sign-in" className="underline dark:text-zinc-300">
-            Sign in
-          </Link>
+          {userIdentifier ? (
+            <SessionUserControls userIdentifier={userIdentifier} />
+          ) : (
+            <Link href="/sign-in" className="underline dark:text-zinc-300">
+              Sign in
+            </Link>
+          )}
         </div>
       </header>
       <InboxClient
