@@ -37,6 +37,7 @@ Convex operational state
 ## Rust Service Endpoints
 
 - `POST /ingest`
+- `POST /signals`
 - `POST /extract`
 - `POST /webhooks/postmark`
 - `GET /items`
@@ -53,6 +54,7 @@ Convex operational state
 Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 
 - `inbox_items`
+- `signal_events`
 - `ingress_events`
 - `work_items`
 - `action_selections`

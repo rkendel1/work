@@ -34,6 +34,23 @@ struct IngressEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignalEvent {
+    id: Uuid,
+    tenant_id: String,
+    source_type: String,
+    raw_payload: Value,
+    normalized_content: String,
+    metadata: SignalMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignalMetadata {
+    sender: Option<String>,
+    timestamp: i64,
+    channel: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct IngressTimelineEntry {
     #[serde(rename = "type")]
     entry_type: String,
@@ -84,6 +101,24 @@ struct IngestRequest {
     source: String,
     content: String,
     tenant_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignalIngestRequest {
+    source_type: Option<String>,
+    raw_payload: Option<Value>,
+    normalized_content: Option<String>,
+    metadata: Option<SignalMetadataInput>,
+    tenant_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignalMetadataInput {
+    sender: Option<String>,
+    timestamp: Option<i64>,
+    channel: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -259,6 +294,7 @@ struct RecordWorkOutcomeRequest {
 }
 
 struct State {
+    signal_events: Vec<SignalEvent>,
     inbox_items: Vec<InboxItem>,
     ingress_events: Vec<IngressEvent>,
     work_items: Vec<WorkItem>,
@@ -289,6 +325,7 @@ impl Default for State {
         let classifications = classifications_from_pack(&default_tenant.id, &default_pack);
 
         Self {
+            signal_events: Vec::new(),
             inbox_items: Vec::new(),
             ingress_events: Vec::new(),
             work_items: Vec::new(),
@@ -882,6 +919,57 @@ fn route_work_item(
     (fallback_org_unit_id, build_routing_path(state, fallback_org_unit_id))
 }
 
+fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_signal_content(raw_payload: &Value, fallback_content: Option<&str>) -> String {
+    if let Some(content) = trimmed_non_empty(fallback_content) {
+        return content;
+    }
+
+    let keys = ["content", "text", "message", "body", "description"];
+    for key in keys {
+        if let Some(value) = raw_payload.get(key).and_then(Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return value.trim().to_string();
+        }
+    }
+
+    if let Some(value) = raw_payload.as_str()
+        && !value.trim().is_empty()
+    {
+        return value.trim().to_string();
+    }
+
+    raw_payload.to_string()
+}
+
+fn create_signal_event(
+    state: &mut State,
+    tenant_id: String,
+    source_type: String,
+    raw_payload: Value,
+    normalized_content: String,
+    metadata: SignalMetadata,
+) -> SignalEvent {
+    let signal_event = SignalEvent {
+        id: Uuid::new_v4(),
+        tenant_id,
+        source_type,
+        raw_payload,
+        normalized_content,
+        metadata,
+    };
+
+    state.signal_events.push(signal_event.clone());
+    signal_event
+}
+
 fn create_inbox_item(
     state: &mut State,
     tenant_id: String,
@@ -1069,6 +1157,24 @@ struct ConvexInboxArgs {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ConvexSignalEventArgs {
+    tenant_id: String,
+    source_type: String,
+    raw_payload: Value,
+    normalized_content: String,
+    metadata: ConvexSignalMetadataArgs,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexSignalMetadataArgs {
+    sender: Option<String>,
+    timestamp: i64,
+    channel: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConvexWorkArgs {
     tenant_id: String,
     external_id: String,
@@ -1211,6 +1317,30 @@ async fn forward_inbox_to_convex(
             content: inbox_item.content.clone(),
             status: inbox_item.status.clone(),
             status_updated_at: inbox_item.status_updated_at.timestamp(),
+        },
+    )
+    .await
+}
+
+async fn forward_signal_event_to_convex(
+    client: &Client,
+    convex_config: &ConvexConfig,
+    signal_event: &SignalEvent,
+) -> Result<(), String> {
+    send_convex_mutation(
+        client,
+        convex_config,
+        "inbox:createSignalEvent",
+        ConvexSignalEventArgs {
+            tenant_id: signal_event.tenant_id.clone(),
+            source_type: signal_event.source_type.clone(),
+            raw_payload: signal_event.raw_payload.clone(),
+            normalized_content: signal_event.normalized_content.clone(),
+            metadata: ConvexSignalMetadataArgs {
+                sender: signal_event.metadata.sender.clone(),
+                timestamp: signal_event.metadata.timestamp,
+                channel: signal_event.metadata.channel.clone(),
+            },
         },
     )
     .await
@@ -1380,20 +1510,41 @@ async fn forward_tenant_bootstrap_to_convex(
 }
 
 async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) -> impl Responder {
-    let (item, received_event) = {
+    let (signal_event, item, received_event) = {
         let mut state = lock_state(&data);
         let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
         ensure_tenant_exists(&mut state, &tenant_id);
+        let raw_payload = serde_json::json!({
+            "source": request.source.clone(),
+            "content": request.content.clone(),
+        });
+        let normalized_content = normalize_signal_content(&raw_payload, Some(&request.content));
+        let signal_event = create_signal_event(
+            &mut state,
+            tenant_id.clone(),
+            request.source.clone(),
+            raw_payload,
+            normalized_content.clone(),
+            SignalMetadata {
+                sender: None,
+                timestamp: Utc::now().timestamp(),
+                channel: None,
+            },
+        );
         let item = create_inbox_item(
             &mut state,
             tenant_id,
             request.source.clone(),
-            request.content.clone(),
+            normalized_content,
         );
         let received_event = state.ingress_events.last().cloned();
-        (item, received_event)
+        (signal_event, item, received_event)
     };
 
+    if let Err(error) = forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+    {
+        eprintln!("failed to forward signal event to convex: {error}");
+    }
     if let Err(error) = forward_inbox_to_convex(&data.client, &data.convex_config, &item).await {
         eprintln!("failed to forward inbox item to convex: {error}");
     }
@@ -1407,6 +1558,78 @@ async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) ->
     }
 
     HttpResponse::Created().json(item)
+}
+
+async fn ingest_signal(
+    data: web::Data<AppState>,
+    request: web::Json<SignalIngestRequest>,
+) -> impl Responder {
+    let source_type = request
+        .source_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("api")
+        .to_string();
+    let raw_payload = request
+        .raw_payload
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let normalized_content =
+        normalize_signal_content(&raw_payload, request.normalized_content.as_deref());
+    if normalized_content.trim().is_empty() {
+        return HttpResponse::BadRequest().body("normalizedContent or rawPayload with text is required");
+    }
+    let metadata_timestamp = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.timestamp)
+        .unwrap_or_else(|| Utc::now().timestamp());
+    let metadata = SignalMetadata {
+        sender: request.metadata.as_ref().and_then(|metadata| metadata.sender.clone()),
+        timestamp: metadata_timestamp,
+        channel: request.metadata.as_ref().and_then(|metadata| metadata.channel.clone()),
+    };
+
+    let (signal_event, inbox_item, received_event) = {
+        let mut state = lock_state(&data);
+        let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+        ensure_tenant_exists(&mut state, &tenant_id);
+        let signal_event = create_signal_event(
+            &mut state,
+            tenant_id.clone(),
+            source_type.clone(),
+            raw_payload,
+            normalized_content.clone(),
+            metadata,
+        );
+        let inbox_item = create_inbox_item(
+            &mut state,
+            tenant_id,
+            source_type.clone(),
+            normalized_content,
+        );
+        let received_event = state.ingress_events.last().cloned();
+        (signal_event, inbox_item, received_event)
+    };
+
+    if let Err(error) = forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+    {
+        eprintln!("failed to forward signal event to convex: {error}");
+    }
+    if let Err(error) = forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await {
+        eprintln!("failed to forward inbox item to convex: {error}");
+    }
+    if let Some(event) = received_event {
+        if let Err(error) =
+            forward_ingress_event_to_convex(&data.client, &data.convex_config, inbox_item.id, &event)
+                .await
+        {
+            eprintln!("failed to forward ingress event to convex: {error}");
+        }
+    }
+
+    HttpResponse::Created().json(inbox_item)
 }
 
 async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) -> impl Responder {
@@ -1504,13 +1727,34 @@ async fn postmark_inbound(
     data: web::Data<AppState>,
     payload: web::Json<PostmarkInboundRequest>,
 ) -> impl Responder {
+    let raw_payload = match serde_json::to_value(&*payload) {
+        Ok(value) => value,
+        Err(_) => serde_json::json!({}),
+    };
     let content = build_postmark_content(&payload);
     let source = postmark_source(&payload);
+    let sender = payload
+        .from_full
+        .as_ref()
+        .and_then(|from_full| from_full.email.clone())
+        .or_else(|| payload.from.clone());
 
-    let (inbox_item, work_item, status_updates, received_event, recommendations_event) = {
+    let (signal_event, inbox_item, work_item, status_updates, received_event, recommendations_event) = {
         let mut state = lock_state(&data);
         let tenant_id = DEFAULT_TENANT_ID.to_string();
         ensure_tenant_exists(&mut state, &tenant_id);
+        let signal_event = create_signal_event(
+            &mut state,
+            tenant_id.clone(),
+            "email".to_string(),
+            raw_payload,
+            content.clone(),
+            SignalMetadata {
+                sender,
+                timestamp: Utc::now().timestamp(),
+                channel: Some("postmark".to_string()),
+            },
+        );
         let inbox_item = create_inbox_item(&mut state, tenant_id, source, content);
         let work_item = create_work_item(&mut state, &inbox_item);
         let mut status_updates = Vec::new();
@@ -1546,6 +1790,7 @@ async fn postmark_inbound(
             .find(|event| event.ingress_id == inbox_item.id && event.event_type == "received")
             .cloned();
         (
+            signal_event,
             inbox_item,
             work_item,
             status_updates,
@@ -1554,6 +1799,11 @@ async fn postmark_inbound(
         )
     };
 
+    if let Err(error) =
+        forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
+    {
+        eprintln!("failed to forward postmark signal event to convex: {error}");
+    }
     if let Err(error) =
         forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await
     {
@@ -2089,6 +2339,7 @@ async fn item_timeline(
 
 fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.route("/ingest", web::post().to(ingest))
+        .route("/signals", web::post().to(ingest_signal))
         .route("/extract", web::post().to(extract))
         .route("/tenants", web::get().to(list_tenants))
         .route("/tenants", web::post().to(create_tenant))
@@ -2253,6 +2504,35 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(work.len(), 1);
         assert_eq!(items[0].status, "work_generated");
+    }
+
+    #[actix_web::test]
+    async fn signal_ingest_normalizes_webhook_payloads() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let request = test::TestRequest::post()
+            .uri("/signals")
+            .set_json(&serde_json::json!({
+                "sourceType": "webhook",
+                "rawPayload": {
+                    "text": "Payment failed for invoice #991"
+                },
+                "metadata": {
+                    "sender": "billing-system",
+                    "channel": "stripe",
+                    "timestamp": 1720000000
+                }
+            }))
+            .to_request();
+
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(inbox_item.source, "webhook");
+        assert_eq!(inbox_item.content, "Payment failed for invoice #991");
+
+        let items_req = test::TestRequest::get().uri("/items").to_request();
+        let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].content, "Payment failed for invoice #991");
     }
 
     #[actix_web::test]

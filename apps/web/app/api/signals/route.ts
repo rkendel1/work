@@ -1,28 +1,34 @@
 import { NextResponse } from "next/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 
-type IngestPayload = {
-  source?: string;
-  content?: string;
+type SignalPayload = {
+  sourceType?: string;
+  rawPayload?: unknown;
+  normalizedContent?: string;
+  metadata?: {
+    sender?: string;
+    timestamp?: number;
+    channel?: string;
+  };
   tenantId?: string;
 };
 
 export async function POST(request: Request) {
-  let payload: IngestPayload;
+  let payload: SignalPayload;
 
   try {
-    payload = (await request.json()) as IngestPayload;
+    payload = (await request.json()) as SignalPayload;
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const source = payload.source?.trim();
-  const content = payload.content?.trim();
+  const sourceType = payload.sourceType?.trim() || "api";
   const tenantId = payload.tenantId?.trim();
+  const normalizedContent = payload.normalizedContent?.trim();
 
-  if (!source || !content) {
+  if (!normalizedContent && !payload.rawPayload) {
     return NextResponse.json(
-      { error: "source and content are required" },
+      { error: "normalizedContent or rawPayload is required" },
       { status: 400 },
     );
   }
@@ -31,9 +37,10 @@ export async function POST(request: Request) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      sourceType: source,
-      rawPayload: { source, content },
-      normalizedContent: content,
+      sourceType,
+      rawPayload: payload.rawPayload,
+      normalizedContent,
+      metadata: payload.metadata,
       tenantId,
     }),
   });
@@ -41,7 +48,7 @@ export async function POST(request: Request) {
   if (!ingestResponse.ok) {
     const body = await ingestResponse.text();
     return NextResponse.json(
-      { error: "Ingress ingest failed", upstreamBody: body },
+      { error: "Signal ingest failed", upstreamBody: body },
       { status: ingestResponse.status },
     );
   }
@@ -57,12 +64,11 @@ export async function POST(request: Request) {
   if (!extractResponse.ok) {
     const body = await extractResponse.text();
     return NextResponse.json(
-      { error: "Ingress extraction failed", inboxItem, upstreamBody: body },
+      { error: "Signal extraction failed", inboxItem, upstreamBody: body },
       { status: extractResponse.status },
     );
   }
 
   const workItem = await extractResponse.json();
-
   return NextResponse.json({ inboxItem, workItem }, { status: 201 });
 }
