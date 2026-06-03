@@ -1,0 +1,10 @@
+{
+  "name": "opsinbox-platform",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm run build:wasm && npm --prefix apps/web run build",
+    "build:wasm": "cd services/ingress-engine && ./build-wasm.sh",
+    "postinstall": "node scripts/bootstrap-convex.js"
+  }
+}
