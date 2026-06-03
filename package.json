@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "npm --prefix apps/web run dev",
     "build": "npm run build:wasm && npm --prefix apps/web run build",
-    "build:wasm": "cd services/ingress-engine && ./build-wasm.sh",
+    "build:wasm": "cd services/rust-api && ./build-wasm.sh",
+    "deploy:rust": "cd services/rust-api && fly deploy",
+    "logs:rust": "fly logs -a canonflo-api",
+    "ssh:rust": "fly ssh console -a canonflo-api",
     "seed:simulation": "node scripts/seed-simulation-data.js",
     "postinstall": "npm --prefix apps/web install && node scripts/bootstrap-convex.js"
   }

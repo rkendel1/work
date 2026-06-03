@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:wasm": "cd ../../services/ingress-engine && ./build-wasm.sh",
+    "build:wasm": "cd ../../services/rust-api && ./build-wasm.sh",
     "start": "next start",
     "lint": "eslint",
     "convex:dev": "convex dev",
