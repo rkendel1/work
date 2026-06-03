@@ -78,4 +78,28 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_name", ["tenantId", "name"]),
+  tenant_classifications: defineTable({
+    tenantId: v.string(),
+    type: v.string(),
+    description: v.string(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_type", ["tenantId", "type"]),
+  operational_packs: defineTable({
+    vertical: v.string(),
+    industry: v.string(),
+    classifications: v.array(
+      v.object({
+        type: v.string(),
+        description: v.string(),
+      }),
+    ),
+    actions: v.array(
+      v.object({
+        name: v.string(),
+        description: v.string(),
+        classificationTypes: v.array(v.string()),
+      }),
+    ),
+  }).index("by_vertical_industry", ["vertical", "industry"]),
 });
