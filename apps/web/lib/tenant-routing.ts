@@ -9,6 +9,14 @@ function normalizeHost(host: string | null | undefined): string {
   return host.toLowerCase().split(":")[0];
 }
 
+export function normalizeTenantSlug(slug: string | null | undefined): string {
+  return (slug ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function isRootHost(host: string | null | undefined): boolean {
   const normalizedHost = normalizeHost(host);
   if (!normalizedHost) {
@@ -44,8 +52,9 @@ export function tenantSlugFromHost(host: string | null | undefined): string | nu
 }
 
 export function tenantDomainFromSlug(slug: string): string {
-  if (slug === "default") {
+  const normalizedSlug = normalizeTenantSlug(slug) || "default";
+  if (normalizedSlug === "default") {
     return `www.${SAAS_ROOT_DOMAIN}`;
   }
-  return `${slug}.${SAAS_ROOT_DOMAIN}`;
+  return `${normalizedSlug}.${SAAS_ROOT_DOMAIN}`;
 }

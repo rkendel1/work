@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware } from "@clerk/nextjs/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
-import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
+import {
+  isRootHost,
+  normalizeTenantSlug,
+  tenantSlugFromHost,
+} from "@/lib/tenant-routing";
 
 type TenantRecord = {
   id: string;
@@ -30,12 +34,19 @@ async function tenantRoutingMiddleware(request: NextRequest) {
       });
       if (response.ok) {
         const tenants = (await response.json()) as TenantRecord[];
-        const tenant = tenants.find((entry) => entry.slug === tenantSlug);
+        const normalizedRequestedSlug = normalizeTenantSlug(tenantSlug);
+        const tenant = tenants.find(
+          (entry) => normalizeTenantSlug(entry.slug) === normalizedRequestedSlug,
+        );
         tenantId = tenant?.id ?? null;
       }
     } catch {
       tenantId = null;
     }
+  }
+
+  if (!tenantId && tenantSlug !== DEFAULT_TENANT_SLUG) {
+    tenantId = tenantSlug;
   }
 
   if (!tenantId) {

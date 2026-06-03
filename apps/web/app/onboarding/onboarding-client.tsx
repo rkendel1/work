@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { SAAS_ROOT_DOMAIN } from "@/lib/runtime-config";
+import { normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 
 type Tenant = {
   id: string;
@@ -36,7 +36,7 @@ const SETUP_PACKS = [
 ];
 
 function tenantUrl(tenant: Tenant): string {
-  const slug = (tenant.slug || tenant.id || "default").trim().toLowerCase();
+  const slug = normalizeTenantSlug(tenant.slug || tenant.id || "default") || "default";
   const current = new URL(window.location.href);
   if (
     current.hostname === "localhost" ||
@@ -48,7 +48,7 @@ function tenantUrl(tenant: Tenant): string {
     return `${current.protocol}//${localHost}${localPort}/`;
   }
 
-  const host = slug === "default" ? `www.${SAAS_ROOT_DOMAIN}` : `${slug}.${SAAS_ROOT_DOMAIN}`;
+  const host = tenantDomainFromSlug(slug);
   return `${current.protocol}//${host}/`;
 }
 
