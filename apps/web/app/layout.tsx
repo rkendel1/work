@@ -20,7 +20,7 @@ export default function RootLayout({
 
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full bg-zinc-50 text-zinc-950">
+      <body className="min-h-full bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
         {clerkConfigured ? (
           <ClerkProvider publishableKey={clerkPublishableKey}>
             <Providers>{children}</Providers>

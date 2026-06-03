@@ -105,16 +105,16 @@ export default function SimulatePage() {
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-6 py-16">
       <section className="space-y-2">
         <h1 className="text-3xl font-semibold">Simulation Harness</h1>
-        <p className="text-zinc-600">
+        <p className="text-zinc-600 dark:text-zinc-400">
           Generate inbound operational signals and replay the full ingest-to-execution pipeline.
         </p>
       </section>
 
-      <form onSubmit={runSimulation} className="grid gap-4 rounded-lg border bg-white p-5">
+      <form onSubmit={runSimulation} className="grid gap-4 rounded-lg border bg-white p-5 dark:bg-zinc-800 dark:border-zinc-700">
         <label className="grid gap-1 text-sm">
           Tenant
           <select
-            className="rounded border px-3 py-2"
+            className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
             value={tenantId}
             onChange={(event) => setTenantId(event.target.value)}
           >
@@ -130,7 +130,7 @@ export default function SimulatePage() {
         <label className="grid gap-1 text-sm">
           Mode
           <select
-            className="rounded border px-3 py-2"
+            className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
             value={mode}
             onChange={(event) => setMode(event.target.value as SimulationMode)}
           >
@@ -144,7 +144,7 @@ export default function SimulatePage() {
           <label className="grid gap-1 text-sm">
             Payload
             <textarea
-              className="min-h-24 rounded border px-3 py-2"
+              className="min-h-24 rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
               value={payload}
               onChange={(event) => setPayload(event.target.value)}
             />
@@ -155,7 +155,7 @@ export default function SimulatePage() {
           <label className="grid gap-1 text-sm">
             Burst size
             <select
-              className="rounded border px-3 py-2"
+              className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
               value={burstSize}
               onChange={(event) => setBurstSize(Number(event.target.value))}
             >
@@ -170,7 +170,7 @@ export default function SimulatePage() {
           <label className="grid gap-1 text-sm">
             Scenario
             <select
-              className="rounded border px-3 py-2"
+              className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
               value={scenario}
               onChange={(event) => setScenario(event.target.value)}
             >
@@ -186,13 +186,13 @@ export default function SimulatePage() {
         <button
           type="submit"
           disabled={running}
-          className="rounded bg-zinc-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+          className="rounded bg-zinc-900 px-4 py-2 font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
         >
           {running ? "Running..." : "Run simulation"}
         </button>
       </form>
 
-      {status ? <p className="text-sm text-zinc-700">{status}</p> : null}
+      {status ? <p className="text-sm text-zinc-700 dark:text-zinc-300">{status}</p> : null}
     </main>
   );
 }
