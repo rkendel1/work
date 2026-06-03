@@ -19,12 +19,16 @@ export async function GET(request: Request) {
   }
   const suffix = query.toString() ? `?${query.toString()}` : "";
 
-  const response = await fetch(`${RUST_INGRESS_URL}/operational-artifacts${suffix}`, {
-    cache: "no-store",
-  });
-  const body = await response.text();
-  return new NextResponse(body, {
-    status: response.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  try {
+    const response = await fetch(`${RUST_INGRESS_URL}/operational-artifacts${suffix}`, {
+      cache: "no-store",
+    });
+    const body = await response.text();
+    return new NextResponse(body, {
+      status: response.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    return NextResponse.json([], { status: 200 });
+  }
 }
