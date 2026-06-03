@@ -1,4 +1,4 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { isRootHost } from "@/lib/tenant-routing";
@@ -20,12 +20,20 @@ export default async function OnboardingPage() {
     redirect("/");
   }
 
+  let userIdentifier: string | null = null;
   if (clerkConfigured && !authBypassEnabled) {
     const { userId } = await auth();
     if (!userId) {
       redirect("/sign-in");
     }
+    const user = await currentUser();
+    const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
+    userIdentifier =
+      user?.primaryEmailAddress?.emailAddress ??
+      (fullName || null) ??
+      user?.username ??
+      userId;
   }
 
-  return <OnboardingClient />;
+  return <OnboardingClient userIdentifier={userIdentifier} />;
 }
