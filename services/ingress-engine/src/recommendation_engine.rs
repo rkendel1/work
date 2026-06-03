@@ -20,6 +20,16 @@ impl ActionType {
             Self::Scheduling => "scheduling",
         }
     }
+
+    pub fn from_category(category: &str) -> Self {
+        match category {
+            "maintenance" => Self::Inspection,
+            "notification" => Self::Notification,
+            "communication" => Self::Communication,
+            "scheduling" => Self::Scheduling,
+            _ => Self::Review,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +80,8 @@ impl RecommendationGenerator for RuleBasedRecommendationEngine {
             "billing_inquiry" => vec![
                 RecommendedAction {
                     title: "Review Invoice".to_string(),
-                    description: "Review invoice details and validate disputed line items.".to_string(),
+                    description: "Review invoice details and validate disputed line items."
+                        .to_string(),
                     action_type: ActionType::Review,
                 },
                 RecommendedAction {

@@ -50,6 +50,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `inbox_items`
 - `ingress_events`
 - `work_items`
+- `actions`
 - `users`
 - `tenants`
 

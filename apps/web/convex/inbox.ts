@@ -3,6 +3,7 @@ import { v } from "convex/values";
 
 export const ingestInboxItem = mutationGeneric({
   args: {
+    tenantId: v.string(),
     externalId: v.string(),
     source: v.string(),
     receivedAt: v.string(),
@@ -11,18 +12,21 @@ export const ingestInboxItem = mutationGeneric({
     statusUpdatedAt: v.number(),
   },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
+    const existing = (
+      await ctx.db
       .query("inbox_items")
-      .withIndex("by_external_id", (query) =>
-        query.eq("externalId", args.externalId),
+      .withIndex("by_tenant_external_id", (query) =>
+        query.eq("tenantId", args.tenantId),
       )
-      .unique();
+      .collect()
+    ).find((item) => item.externalId === args.externalId);
 
     if (existing) {
       return existing._id;
     }
 
     return await ctx.db.insert("inbox_items", {
+      tenantId: args.tenantId,
       externalId: args.externalId,
       source: args.source,
       receivedAt: args.receivedAt,
@@ -35,24 +39,28 @@ export const ingestInboxItem = mutationGeneric({
 
 export const createIngressEvent = mutationGeneric({
   args: {
+    tenantId: v.string(),
     ingressExternalId: v.string(),
     eventType: v.string(),
     description: v.string(),
     createdAt: v.number(),
   },
   handler: async (ctx, args) => {
-    const ingress = await ctx.db
+    const ingress = (
+      await ctx.db
       .query("inbox_items")
-      .withIndex("by_external_id", (query) =>
-        query.eq("externalId", args.ingressExternalId),
+      .withIndex("by_tenant_external_id", (query) =>
+        query.eq("tenantId", args.tenantId),
       )
-      .unique();
+      .collect()
+    ).find((item) => item.externalId === args.ingressExternalId);
 
     if (!ingress) {
       throw new Error("inbox item not found");
     }
 
     return await ctx.db.insert("ingress_events", {
+      tenantId: args.tenantId,
       ingressId: ingress._id,
       eventType: args.eventType,
       description: args.description,
@@ -63,6 +71,7 @@ export const createIngressEvent = mutationGeneric({
 
 export const updateIngressStatus = mutationGeneric({
   args: {
+    tenantId: v.string(),
     ingressExternalId: v.string(),
     status: v.string(),
     statusUpdatedAt: v.number(),
@@ -71,12 +80,14 @@ export const updateIngressStatus = mutationGeneric({
     createdAt: v.number(),
   },
   handler: async (ctx, args) => {
-    const ingress = await ctx.db
+    const ingress = (
+      await ctx.db
       .query("inbox_items")
-      .withIndex("by_external_id", (query) =>
-        query.eq("externalId", args.ingressExternalId),
+      .withIndex("by_tenant_external_id", (query) =>
+        query.eq("tenantId", args.tenantId),
       )
-      .unique();
+      .collect()
+    ).find((item) => item.externalId === args.ingressExternalId);
 
     if (!ingress) {
       throw new Error("inbox item not found");
@@ -88,6 +99,7 @@ export const updateIngressStatus = mutationGeneric({
     });
 
     await ctx.db.insert("ingress_events", {
+      tenantId: args.tenantId,
       ingressId: ingress._id,
       eventType: args.eventType,
       description: args.description,
@@ -100,8 +112,10 @@ export const updateIngressStatus = mutationGeneric({
 
 export const createWorkItem = mutationGeneric({
   args: {
+    tenantId: v.string(),
     externalId: v.string(),
     inboxExternalId: v.string(),
+    classificationType: v.string(),
     title: v.string(),
     summary: v.string(),
     status: v.string(),
@@ -116,20 +130,24 @@ export const createWorkItem = mutationGeneric({
     ),
   },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
+    const existing = (
+      await ctx.db
       .query("work_items")
-      .withIndex("by_external_id", (query) =>
-        query.eq("externalId", args.externalId),
+      .withIndex("by_tenant_external_id", (query) =>
+        query.eq("tenantId", args.tenantId),
       )
-      .unique();
+      .collect()
+    ).find((item) => item.externalId === args.externalId);
 
     if (existing) {
       return existing._id;
     }
 
     return await ctx.db.insert("work_items", {
+      tenantId: args.tenantId,
       externalId: args.externalId,
       inboxExternalId: args.inboxExternalId,
+      classificationType: args.classificationType,
       title: args.title,
       summary: args.summary,
       status: args.status,
@@ -139,30 +157,45 @@ export const createWorkItem = mutationGeneric({
 });
 
 export const listInboxItems = queryGeneric({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db.query("inbox_items").order("desc").collect();
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("inbox_items")
+      .withIndex("by_tenant_external_id", (query) => query.eq("tenantId", args.tenantId))
+      .order("desc")
+      .collect();
   },
 });
 
 export const listWorkItems = queryGeneric({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db.query("work_items").order("desc").collect();
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("work_items")
+      .withIndex("by_tenant_external_id", (query) => query.eq("tenantId", args.tenantId))
+      .order("desc")
+      .collect();
   },
 });
 
 export const getIngressTimeline = queryGeneric({
   args: {
+    tenantId: v.string(),
     ingressExternalId: v.string(),
   },
   handler: async (ctx, args) => {
-    const ingress = await ctx.db
+    const ingress = (
+      await ctx.db
       .query("inbox_items")
-      .withIndex("by_external_id", (query) =>
-        query.eq("externalId", args.ingressExternalId),
+      .withIndex("by_tenant_external_id", (query) =>
+        query.eq("tenantId", args.tenantId),
       )
-      .unique();
+      .collect()
+    ).find((item) => item.externalId === args.ingressExternalId);
 
     if (!ingress) {
       return [];

@@ -1,10 +1,10 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use recommendation_engine::{
-    ClassificationResult, Entity as ClassificationEntity, RecommendedAction, RecommendationGenerator,
-    RuleBasedRecommendationEngine,
+    ActionType, ClassificationResult, Entity as ClassificationEntity, RecommendationGenerator,
+    RecommendedAction, RuleBasedRecommendationEngine,
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
@@ -14,6 +14,7 @@ mod recommendation_engine;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InboxItem {
     id: Uuid,
+    tenant_id: String,
     source: String,
     received_at: DateTime<Utc>,
     content: String,
@@ -24,6 +25,7 @@ struct InboxItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IngressEvent {
     ingress_id: Uuid,
+    tenant_id: String,
     event_type: String,
     description: String,
     created_at: DateTime<Utc>,
@@ -40,7 +42,9 @@ struct IngressTimelineEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkItem {
     id: Uuid,
+    tenant_id: String,
     inbox_item_id: Uuid,
+    classification_type: String,
     title: String,
     summary: String,
     status: String,
@@ -48,14 +52,29 @@ struct WorkItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IngestRequest {
     source: String,
     content: String,
+    tenant_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ExtractRequest {
     inbox_item_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantScopedQuery {
+    tenant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionQuery {
+    tenant_id: Option<String>,
+    classification_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,11 +100,80 @@ struct PostmarkWebhookResponse {
     work_item: WorkItem,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Tenant {
+    id: String,
+    slug: String,
+    display_name: String,
+    vertical: String,
+    industry: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActionDefinition {
+    id: Uuid,
+    tenant_id: String,
+    name: String,
+    description: String,
+    category: String,
+    classification_types: Vec<String>,
+    active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateTenantRequest {
+    name: String,
+    vertical: String,
+    industry: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateActionRequest {
+    tenant_id: Option<String>,
+    name: String,
+    description: String,
+    category: String,
+    classification_types: Vec<String>,
+    active: Option<bool>,
+}
+
 struct State {
     inbox_items: Vec<InboxItem>,
     ingress_events: Vec<IngressEvent>,
     work_items: Vec<WorkItem>,
+    tenants: Vec<Tenant>,
+    actions: Vec<ActionDefinition>,
+}
+
+const DEFAULT_TENANT_ID: &str = "default";
+const DEFAULT_TENANT_SLUG: &str = "default";
+const DEFAULT_TENANT_NAME: &str = "Default Tenant";
+
+impl Default for State {
+    fn default() -> Self {
+        let default_tenant = Tenant {
+            id: DEFAULT_TENANT_ID.to_string(),
+            slug: DEFAULT_TENANT_SLUG.to_string(),
+            display_name: DEFAULT_TENANT_NAME.to_string(),
+            vertical: "Property Management".to_string(),
+            industry: "Commercial Real Estate".to_string(),
+        };
+        let actions = default_actions_for(
+            &default_tenant.id,
+            "Property Management",
+            "Commercial Real Estate",
+        );
+
+        Self {
+            inbox_items: Vec::new(),
+            ingress_events: Vec::new(),
+            work_items: Vec::new(),
+            tenants: vec![default_tenant],
+            actions,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,10 +280,135 @@ fn classification_title(classification: &str) -> &'static str {
     }
 }
 
-fn create_inbox_item(state: &mut State, source: String, content: String) -> InboxItem {
+fn normalize_identifier(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn resolve_tenant_id(tenant_id: Option<&str>) -> String {
+    tenant_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_TENANT_ID)
+        .to_string()
+}
+
+fn default_actions_for(tenant_id: &str, vertical: &str, industry: &str) -> Vec<ActionDefinition> {
+    let mut actions = vec![
+        ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: "Inspect HVAC Unit".to_string(),
+            description: "Send technician to inspect HVAC equipment.".to_string(),
+            category: "maintenance".to_string(),
+            classification_types: vec!["maintenance_request".to_string()],
+            active: true,
+        },
+        ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: "Review Invoice".to_string(),
+            description: "Review invoice details and validate disputed line items.".to_string(),
+            category: "review".to_string(),
+            classification_types: vec!["billing_inquiry".to_string()],
+            active: true,
+        },
+        ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: "Send Appointment Options".to_string(),
+            description: "Provide available appointment options and confirmation path.".to_string(),
+            category: "scheduling".to_string(),
+            classification_types: vec!["scheduling_request".to_string()],
+            active: true,
+        },
+    ];
+
+    if vertical.eq_ignore_ascii_case("Property Management")
+        && industry.eq_ignore_ascii_case("Commercial Real Estate")
+    {
+        actions.push(ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: "Dispatch Vendor".to_string(),
+            description: "Coordinate approved vendor dispatch for building maintenance."
+                .to_string(),
+            category: "maintenance".to_string(),
+            classification_types: vec!["maintenance_request".to_string()],
+            active: true,
+        });
+        actions.push(ActionDefinition {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            name: "Schedule Repair".to_string(),
+            description: "Schedule repair window with onsite operations and vendor.".to_string(),
+            category: "scheduling".to_string(),
+            classification_types: vec!["maintenance_request".to_string()],
+            active: true,
+        });
+    }
+
+    actions
+}
+
+fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
+    if state.tenants.iter().any(|tenant| tenant.id == tenant_id) {
+        return;
+    }
+
+    let tenant = Tenant {
+        id: tenant_id.to_string(),
+        slug: normalize_identifier(tenant_id),
+        display_name: tenant_id.to_string(),
+        vertical: "General".to_string(),
+        industry: "General".to_string(),
+    };
+    state.tenants.push(tenant);
+}
+
+fn tenant_recommendations(
+    state: &State,
+    tenant_id: &str,
+    classification_type: &str,
+) -> Vec<RecommendedAction> {
+    state
+        .actions
+        .iter()
+        .filter(|action| {
+            action.tenant_id == tenant_id
+                && action.active
+                && action
+                    .classification_types
+                    .iter()
+                    .any(|action_type| action_type == classification_type)
+        })
+        .map(|action| RecommendedAction {
+            title: action.name.clone(),
+            description: action.description.clone(),
+            action_type: ActionType::from_category(&action.category),
+        })
+        .collect()
+}
+
+fn create_inbox_item(
+    state: &mut State,
+    tenant_id: String,
+    source: String,
+    content: String,
+) -> InboxItem {
     let now = Utc::now();
     let item = InboxItem {
         id: Uuid::new_v4(),
+        tenant_id,
         source,
         received_at: now,
         content,
@@ -207,6 +420,7 @@ fn create_inbox_item(state: &mut State, source: String, content: String) -> Inbo
     create_ingress_event(
         state,
         item.id,
+        item.tenant_id.clone(),
         "received".to_string(),
         format!("Received via {}", item.source),
     );
@@ -216,11 +430,13 @@ fn create_inbox_item(state: &mut State, source: String, content: String) -> Inbo
 fn create_ingress_event(
     state: &mut State,
     ingress_id: Uuid,
+    tenant_id: String,
     event_type: String,
     description: String,
 ) -> IngressEvent {
     let event = IngressEvent {
         ingress_id,
+        tenant_id,
         event_type,
         description,
         created_at: Utc::now(),
@@ -242,6 +458,7 @@ fn update_ingress_status(
         .inbox_items
         .iter_mut()
         .find(|item| item.id == inbox_item_id)?;
+    let tenant_id = inbox_item.tenant_id.clone();
 
     inbox_item.status = new_status.clone();
     inbox_item.status_updated_at = now;
@@ -250,6 +467,7 @@ fn update_ingress_status(
     Some(create_ingress_event(
         state,
         inbox_item_id,
+        tenant_id,
         new_status,
         description,
     ))
@@ -257,11 +475,21 @@ fn update_ingress_status(
 
 fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
     let mut classification_result = classify_content(&inbox_item.content);
-    let recommendation_engine = RuleBasedRecommendationEngine;
-    classification_result.recommendations = recommendation_engine.generate(&classification_result);
+    classification_result.recommendations = tenant_recommendations(
+        state,
+        &inbox_item.tenant_id,
+        &classification_result.classification,
+    );
+    if classification_result.recommendations.is_empty() {
+        let recommendation_engine = RuleBasedRecommendationEngine;
+        classification_result.recommendations =
+            recommendation_engine.generate(&classification_result);
+    }
     let work_item = WorkItem {
         id: Uuid::new_v4(),
+        tenant_id: inbox_item.tenant_id.clone(),
         inbox_item_id: inbox_item.id,
+        classification_type: classification_result.classification.clone(),
         title: classification_title(&classification_result.classification).to_string(),
         summary: classification_result.reason.clone(),
         status: "open".to_string(),
@@ -338,6 +566,7 @@ struct ConvexMutationRequest<T> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConvexInboxArgs {
+    tenant_id: String,
     external_id: String,
     source: String,
     received_at: String,
@@ -349,8 +578,10 @@ struct ConvexInboxArgs {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConvexWorkArgs {
+    tenant_id: String,
     external_id: String,
     inbox_external_id: String,
+    classification_type: String,
     title: String,
     summary: String,
     status: String,
@@ -368,6 +599,7 @@ struct ConvexRecommendedAction {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConvexIngressEventArgs {
+    tenant_id: String,
     ingress_external_id: String,
     event_type: String,
     description: String,
@@ -377,6 +609,7 @@ struct ConvexIngressEventArgs {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConvexUpdateIngressStatusArgs {
+    tenant_id: String,
     ingress_external_id: String,
     status: String,
     status_updated_at: i64,
@@ -435,6 +668,7 @@ async fn forward_inbox_to_convex(
         convex_config,
         "inbox:ingestInboxItem",
         ConvexInboxArgs {
+            tenant_id: inbox_item.tenant_id.clone(),
             external_id: inbox_item.id.to_string(),
             source: inbox_item.source.clone(),
             received_at: inbox_item.received_at.to_rfc3339(),
@@ -456,8 +690,10 @@ async fn forward_work_to_convex(
         convex_config,
         "inbox:createWorkItem",
         ConvexWorkArgs {
+            tenant_id: work_item.tenant_id.clone(),
             external_id: work_item.id.to_string(),
             inbox_external_id: work_item.inbox_item_id.to_string(),
+            classification_type: work_item.classification_type.clone(),
             title: work_item.title.clone(),
             summary: work_item.summary.clone(),
             status: work_item.status.clone(),
@@ -486,6 +722,7 @@ async fn forward_ingress_event_to_convex(
         convex_config,
         "inbox:createIngressEvent",
         ConvexIngressEventArgs {
+            tenant_id: event.tenant_id.clone(),
             ingress_external_id: inbox_item_id.to_string(),
             event_type: event.event_type.clone(),
             description: event.description.clone(),
@@ -506,6 +743,7 @@ async fn forward_status_update_to_convex(
         convex_config,
         "inbox:updateIngressStatus",
         ConvexUpdateIngressStatusArgs {
+            tenant_id: event.tenant_id.clone(),
             ingress_external_id: inbox_item_id.to_string(),
             status: event.event_type.clone(),
             status_updated_at: event.created_at.timestamp(),
@@ -520,7 +758,14 @@ async fn forward_status_update_to_convex(
 async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) -> impl Responder {
     let (item, received_event) = {
         let mut state = lock_state(&data);
-        let item = create_inbox_item(&mut state, request.source.clone(), request.content.clone());
+        let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+        ensure_tenant_exists(&mut state, &tenant_id);
+        let item = create_inbox_item(
+            &mut state,
+            tenant_id,
+            request.source.clone(),
+            request.content.clone(),
+        );
         let received_event = state.ingress_events.last().cloned();
         (item, received_event)
     };
@@ -530,7 +775,8 @@ async fn ingest(data: web::Data<AppState>, request: web::Json<IngestRequest>) ->
     }
     if let Some(event) = received_event {
         if let Err(error) =
-            forward_ingress_event_to_convex(&data.client, &data.convex_config, item.id, &event).await
+            forward_ingress_event_to_convex(&data.client, &data.convex_config, item.id, &event)
+                .await
         {
             eprintln!("failed to forward ingress event to convex: {error}");
         }
@@ -573,6 +819,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             let recommendations_event = create_ingress_event(
                 &mut state,
                 inbox_item.id,
+                inbox_item.tenant_id.clone(),
                 "recommendations_generated".to_string(),
                 format!(
                     "Generated {} recommended actions",
@@ -636,15 +883,11 @@ async fn postmark_inbound(
     let content = build_postmark_content(&payload);
     let source = postmark_source(&payload);
 
-    let (
-        inbox_item,
-        work_item,
-        status_updates,
-        received_event,
-        recommendations_event,
-    ) = {
+    let (inbox_item, work_item, status_updates, received_event, recommendations_event) = {
         let mut state = lock_state(&data);
-        let inbox_item = create_inbox_item(&mut state, source, content);
+        let tenant_id = DEFAULT_TENANT_ID.to_string();
+        ensure_tenant_exists(&mut state, &tenant_id);
+        let inbox_item = create_inbox_item(&mut state, tenant_id, source, content);
         let work_item = create_work_item(&mut state, &inbox_item);
         let mut status_updates = Vec::new();
         if let Some(classified_event) = update_ingress_status(
@@ -658,6 +901,7 @@ async fn postmark_inbound(
         let recommendations_event = create_ingress_event(
             &mut state,
             inbox_item.id,
+            inbox_item.tenant_id.clone(),
             "recommendations_generated".to_string(),
             format!(
                 "Generated {} recommended actions",
@@ -692,9 +936,13 @@ async fn postmark_inbound(
         eprintln!("failed to forward postmark inbox item to convex: {error}");
     }
     if let Some(event) = received_event {
-        if let Err(error) =
-            forward_ingress_event_to_convex(&data.client, &data.convex_config, inbox_item.id, &event)
-                .await
+        if let Err(error) = forward_ingress_event_to_convex(
+            &data.client,
+            &data.convex_config,
+            inbox_item.id,
+            &event,
+        )
+        .await
         {
             eprintln!("failed to forward postmark ingress event to convex: {error}");
         }
@@ -733,12 +981,150 @@ async fn postmark_inbound(
     })
 }
 
-async fn list_items(data: web::Data<AppState>) -> impl Responder {
-    let state = lock_state(&data);
-    HttpResponse::Ok().json(&state.inbox_items)
+async fn create_tenant(
+    data: web::Data<AppState>,
+    request: web::Json<CreateTenantRequest>,
+) -> impl Responder {
+    let name = request.name.trim();
+    let vertical = request.vertical.trim();
+    let industry = request.industry.trim();
+    if name.is_empty() || vertical.is_empty() || industry.is_empty() {
+        return HttpResponse::BadRequest().body("name, vertical, and industry are required");
+    }
+
+    let mut state = lock_state(&data);
+    let mut slug = normalize_identifier(name);
+    if slug.is_empty() {
+        slug = format!("tenant_{}", Uuid::new_v4().simple());
+    }
+    let mut id = slug.clone();
+    if state.tenants.iter().any(|tenant| tenant.id == id) {
+        id = format!("{id}_{}", Uuid::new_v4().simple());
+    }
+
+    let tenant = Tenant {
+        id: id.clone(),
+        slug,
+        display_name: name.to_string(),
+        vertical: vertical.to_string(),
+        industry: industry.to_string(),
+    };
+    state.tenants.push(tenant.clone());
+    state
+        .actions
+        .extend(default_actions_for(&id, vertical, industry));
+
+    HttpResponse::Created().json(tenant)
 }
 
-async fn item_timeline(data: web::Data<AppState>, inbox_item_id: web::Path<Uuid>) -> impl Responder {
+async fn list_tenants(data: web::Data<AppState>) -> impl Responder {
+    let state = lock_state(&data);
+    HttpResponse::Ok().json(&state.tenants)
+}
+
+async fn create_action(
+    data: web::Data<AppState>,
+    request: web::Json<CreateActionRequest>,
+) -> impl Responder {
+    if request.name.trim().is_empty()
+        || request.description.trim().is_empty()
+        || request.category.trim().is_empty()
+        || request.classification_types.is_empty()
+    {
+        return HttpResponse::BadRequest()
+            .body("name, description, category, and classificationTypes are required");
+    }
+
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    ensure_tenant_exists(&mut state, &tenant_id);
+
+    let action = ActionDefinition {
+        id: Uuid::new_v4(),
+        tenant_id,
+        name: request.name.trim().to_string(),
+        description: request.description.trim().to_string(),
+        category: request.category.trim().to_lowercase(),
+        classification_types: request
+            .classification_types
+            .iter()
+            .map(|classification| classification.trim().to_lowercase())
+            .filter(|classification| !classification.is_empty())
+            .collect(),
+        active: request.active.unwrap_or(true),
+    };
+
+    if action.classification_types.is_empty() {
+        return HttpResponse::BadRequest().body("classificationTypes cannot be empty");
+    }
+
+    state.actions.push(action.clone());
+    HttpResponse::Created().json(action)
+}
+
+async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let classification_type = query
+        .classification_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let state = lock_state(&data);
+    let actions: Vec<ActionDefinition> = state
+        .actions
+        .iter()
+        .filter(|action| action.tenant_id == tenant_id)
+        .filter(|action| {
+            if let Some(classification_type) = &classification_type {
+                action
+                    .classification_types
+                    .iter()
+                    .any(|item| item == classification_type)
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    HttpResponse::Ok().json(actions)
+}
+
+async fn list_items(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let items: Vec<InboxItem> = state
+        .inbox_items
+        .iter()
+        .filter(|item| item.tenant_id == tenant_id)
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(items)
+}
+
+async fn list_work(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let work_items: Vec<WorkItem> = state
+        .work_items
+        .iter()
+        .filter(|work_item| work_item.tenant_id == tenant_id)
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(work_items)
+}
+
+async fn item_timeline(
+    data: web::Data<AppState>,
+    inbox_item_id: web::Path<Uuid>,
+) -> impl Responder {
     let state = lock_state(&data);
     let mut timeline: Vec<IngressTimelineEntry> = state
         .ingress_events
@@ -755,14 +1141,13 @@ async fn item_timeline(data: web::Data<AppState>, inbox_item_id: web::Path<Uuid>
     HttpResponse::Ok().json(timeline)
 }
 
-async fn list_work(data: web::Data<AppState>) -> impl Responder {
-    let state = lock_state(&data);
-    HttpResponse::Ok().json(&state.work_items)
-}
-
 fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.route("/ingest", web::post().to(ingest))
         .route("/extract", web::post().to(extract))
+        .route("/tenants", web::get().to(list_tenants))
+        .route("/tenants", web::post().to(create_tenant))
+        .route("/actions", web::get().to(list_actions))
+        .route("/actions", web::post().to(create_action))
         .route("/items", web::get().to(list_items))
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
@@ -802,6 +1187,7 @@ mod tests {
         let ingest_payload = IngestRequest {
             source: "email".to_string(),
             content: "The HVAC unit is not working and the room is too hot".to_string(),
+            tenant_id: None,
         };
 
         let ingest_req = test::TestRequest::post()
@@ -825,7 +1211,7 @@ mod tests {
         assert_eq!(work_item.inbox_item_id, inbox_item.id);
         assert_eq!(work_item.title, "Maintenance Request");
         assert_eq!(work_item.status, "open");
-        assert_eq!(work_item.recommended_actions.len(), 2);
+        assert_eq!(work_item.recommended_actions.len(), 3);
         assert_eq!(work_item.recommended_actions[0].title, "Inspect HVAC Unit");
         assert_eq!(items[0].status, "work_generated");
     }
@@ -855,6 +1241,7 @@ mod tests {
             .set_json(&IngestRequest {
                 source: "manual".to_string(),
                 content: "Invoice payment question".to_string(),
+                tenant_id: None,
             })
             .to_request();
 
@@ -903,7 +1290,7 @@ mod tests {
         assert_eq!(response.inbox_item.source, "postmark:alerts@example.com");
         assert!(response.inbox_item.content.contains("HVAC broken"));
         assert_eq!(response.work_item.title, "Maintenance Request");
-        assert_eq!(response.work_item.recommended_actions.len(), 2);
+        assert_eq!(response.work_item.recommended_actions.len(), 3);
 
         let items_req = test::TestRequest::get().uri("/items").to_request();
         let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
@@ -925,6 +1312,7 @@ mod tests {
             .set_json(&IngestRequest {
                 source: "email".to_string(),
                 content: "HVAC is broken".to_string(),
+                tenant_id: None,
             })
             .to_request();
 
@@ -957,6 +1345,77 @@ mod tests {
                 "recommendations_generated".to_string(),
                 "work_generated".to_string()
             ]
+        );
+    }
+
+    #[actix_web::test]
+    async fn tenant_actions_are_used_for_recommendations() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_action_req = test::TestRequest::post()
+            .uri("/actions")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "name": "Create Service Ticket",
+                "description": "Create ticket in tenant maintenance system.",
+                "category": "maintenance",
+                "classificationTypes": ["maintenance_request"],
+                "active": true
+            }))
+            .to_request();
+        let _: ActionDefinition = test::call_and_read_body_json(&app, create_action_req).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC on floor 5 is down",
+                "tenantId": "acme"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        assert_eq!(work_item.tenant_id, "acme");
+        assert_eq!(work_item.classification_type, "maintenance_request");
+        assert_eq!(work_item.recommended_actions.len(), 1);
+        assert_eq!(
+            work_item.recommended_actions[0].title,
+            "Create Service Ticket"
+        );
+    }
+
+    #[actix_web::test]
+    async fn creating_tenant_provisions_default_actions() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let create_tenant_req = test::TestRequest::post()
+            .uri("/tenants")
+            .set_json(&serde_json::json!({
+                "name": "Acme Property Management",
+                "vertical": "Property Management",
+                "industry": "Commercial Real Estate"
+            }))
+            .to_request();
+        let tenant: Tenant = test::call_and_read_body_json(&app, create_tenant_req).await;
+
+        let actions_req = test::TestRequest::get()
+            .uri(&format!("/actions?tenantId={}", tenant.id))
+            .to_request();
+        let actions: Vec<ActionDefinition> = test::call_and_read_body_json(&app, actions_req).await;
+
+        assert!(!actions.is_empty());
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.name == "Dispatch Vendor")
         );
     }
 }

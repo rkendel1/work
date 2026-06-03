@@ -3,22 +3,30 @@ import { v } from "convex/values";
 
 export default defineSchema({
   inbox_items: defineTable({
+    tenantId: v.string(),
     externalId: v.string(),
     source: v.string(),
     receivedAt: v.string(),
     content: v.string(),
     status: v.string(),
     statusUpdatedAt: v.number(),
-  }).index("by_external_id", ["externalId"]),
+  })
+    .index("by_external_id", ["externalId"])
+    .index("by_tenant_external_id", ["tenantId", "externalId"]),
   ingress_events: defineTable({
+    tenantId: v.string(),
     ingressId: v.id("inbox_items"),
     eventType: v.string(),
     description: v.string(),
     createdAt: v.number(),
-  }).index("by_ingress_id_created_at", ["ingressId", "createdAt"]),
+  })
+    .index("by_ingress_id_created_at", ["ingressId", "createdAt"])
+    .index("by_tenant_created_at", ["tenantId", "createdAt"]),
   work_items: defineTable({
+    tenantId: v.string(),
     externalId: v.string(),
     inboxExternalId: v.string(),
+    classificationType: v.string(),
     title: v.string(),
     summary: v.string(),
     status: v.string(),
@@ -33,13 +41,41 @@ export default defineSchema({
     ),
   })
     .index("by_external_id", ["externalId"])
-    .index("by_inbox_external_id", ["inboxExternalId"]),
+    .index("by_inbox_external_id", ["inboxExternalId"])
+    .index("by_tenant_external_id", ["tenantId", "externalId"])
+    .index("by_tenant_inbox_external_id", ["tenantId", "inboxExternalId"]),
   users: defineTable({
     email: v.string(),
     name: v.optional(v.string()),
   }).index("by_email", ["email"]),
   tenants: defineTable({
+    id: v.string(),
     slug: v.string(),
     displayName: v.string(),
+    vertical: v.string(),
+    industry: v.string(),
   }).index("by_slug", ["slug"]),
+  core_classifications: defineTable({
+    key: v.string(),
+    label: v.string(),
+  }).index("by_key", ["key"]),
+  verticals: defineTable({
+    name: v.string(),
+  }).index("by_name", ["name"]),
+  industries: defineTable({
+    vertical: v.string(),
+    name: v.string(),
+  })
+    .index("by_name", ["name"])
+    .index("by_vertical_name", ["vertical", "name"]),
+  actions: defineTable({
+    tenantId: v.string(),
+    name: v.string(),
+    description: v.string(),
+    category: v.string(),
+    classificationTypes: v.array(v.string()),
+    active: v.boolean(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_name", ["tenantId", "name"]),
 });
