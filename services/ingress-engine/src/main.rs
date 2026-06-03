@@ -6,6 +6,8 @@ use recommendation_engine::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -48,6 +50,9 @@ struct WorkItem {
     title: String,
     summary: String,
     status: String,
+    assigned_org_unit_id: Uuid,
+    current_owner_id: Option<String>,
+    routing_path: Vec<Uuid>,
     recommended_actions: Vec<RecommendedAction>,
 }
 
@@ -132,6 +137,17 @@ struct Tenant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrgUnit {
+    id: Uuid,
+    tenant_id: String,
+    name: String,
+    #[serde(rename = "type")]
+    unit_type: String,
+    parent_id: Option<Uuid>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ActionDefinition {
     id: Uuid,
     tenant_id: String,
@@ -139,6 +155,8 @@ struct ActionDefinition {
     description: String,
     category: String,
     classification_types: Vec<String>,
+    assigned_org_unit_id: Uuid,
+    default_owner_role: Option<String>,
     active: bool,
 }
 
@@ -188,7 +206,38 @@ struct CreateActionRequest {
     description: String,
     category: String,
     classification_types: Vec<String>,
+    assigned_org_unit_id: Option<Uuid>,
+    default_owner_role: Option<String>,
     active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateOrgUnitRequest {
+    tenant_id: Option<String>,
+    name: String,
+    #[serde(rename = "type")]
+    unit_type: String,
+    parent_id: Option<Uuid>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutingPreviewQuery {
+    tenant_id: Option<String>,
+    classification_type: Option<String>,
+    action_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkRoutingPreview {
+    tenant_id: String,
+    classification_type: String,
+    action_name: Option<String>,
+    assigned_org_unit: Option<OrgUnit>,
+    routing_path: Vec<OrgUnit>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +263,7 @@ struct State {
     ingress_events: Vec<IngressEvent>,
     work_items: Vec<WorkItem>,
     tenants: Vec<Tenant>,
+    org_units: Vec<OrgUnit>,
     actions: Vec<ActionDefinition>,
     classifications: Vec<ClassificationDefinition>,
     action_selections: Vec<ActionSelection>,
@@ -234,7 +284,8 @@ impl Default for State {
             industry: "Commercial Real Estate".to_string(),
         };
         let default_pack = load_pack("Property Management", "Commercial Real Estate");
-        let actions = actions_from_pack(&default_tenant.id, &default_pack);
+        let org_units = org_units_from_pack(&default_tenant.id, &default_pack);
+        let actions = actions_from_pack(&default_tenant.id, &default_pack, &org_units);
         let classifications = classifications_from_pack(&default_tenant.id, &default_pack);
 
         Self {
@@ -242,6 +293,7 @@ impl Default for State {
             ingress_events: Vec::new(),
             work_items: Vec::new(),
             tenants: vec![default_tenant],
+            org_units,
             actions,
             classifications,
             action_selections: Vec::new(),
@@ -556,7 +608,114 @@ fn load_pack(vertical: &str, industry: &str) -> OperationalPack {
     }
 }
 
-fn actions_from_pack(tenant_id: &str, pack: &OperationalPack) -> Vec<ActionDefinition> {
+fn pack_org_unit_templates(pack: &OperationalPack) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+    if pack.vertical == "Property Management" && pack.industry == "Commercial Real Estate" {
+        return vec![
+            ("Operations", "department", None),
+            ("Maintenance", "team", Some("Operations")),
+            ("HVAC Team", "team", Some("Maintenance")),
+            ("Plumbing Vendor", "vendor", Some("Maintenance")),
+            ("Leasing", "team", Some("Operations")),
+            ("Front Desk", "team", Some("Operations")),
+        ];
+    }
+
+    if pack.vertical == "Healthcare" && pack.industry == "Clinic" {
+        return vec![
+            ("Clinic Operations", "department", None),
+            ("Reception", "team", Some("Clinic Operations")),
+            ("Clinical Staff", "team", Some("Clinic Operations")),
+            ("Billing", "team", Some("Clinic Operations")),
+            ("Compliance", "team", Some("Clinic Operations")),
+        ];
+    }
+
+    vec![("Operations", "department", None), ("General Team", "team", Some("Operations"))]
+}
+
+fn pack_action_org_unit_name(pack: &OperationalPack, action_name: &str) -> &'static str {
+    if pack.vertical == "Property Management" && pack.industry == "Commercial Real Estate" {
+        return match action_name {
+            "Inspect HVAC Unit" => "HVAC Team",
+            "Dispatch Maintenance Vendor" => "Plumbing Vendor",
+            "Respond to Tenant" => "Front Desk",
+            "Schedule Inspection" => "Maintenance",
+            "Create Work Order" => "Maintenance",
+            "Escalate to Property Manager" => "Operations",
+            _ => "Operations",
+        };
+    }
+
+    if pack.vertical == "Healthcare" && pack.industry == "Clinic" {
+        return match action_name {
+            "Schedule Appointment" => "Reception",
+            "Notify Clinical Staff" => "Clinical Staff",
+            "Resolve Billing Inquiry" => "Billing",
+            "Escalate to Provider" => "Clinical Staff",
+            _ => "Clinic Operations",
+        };
+    }
+
+    "General Team"
+}
+
+fn org_units_from_pack(tenant_id: &str, pack: &OperationalPack) -> Vec<OrgUnit> {
+    let templates = pack_org_unit_templates(pack);
+    let mut ids_by_name: HashMap<&str, Uuid> = HashMap::new();
+    let mut units = Vec::new();
+
+    for (name, unit_type, parent_name) in templates {
+        let id = Uuid::new_v4();
+        let parent_id = parent_name.and_then(|parent| ids_by_name.get(parent).copied());
+        ids_by_name.insert(name, id);
+        units.push(OrgUnit {
+            id,
+            tenant_id: tenant_id.to_string(),
+            name: name.to_string(),
+            unit_type: unit_type.to_string(),
+            parent_id,
+            metadata: None,
+        });
+    }
+
+    units
+}
+
+fn tenant_primary_org_unit_id(state: &State, tenant_id: &str) -> Option<Uuid> {
+    state
+        .org_units
+        .iter()
+        .find(|unit| unit.tenant_id == tenant_id && unit.parent_id.is_none())
+        .or_else(|| state.org_units.iter().find(|unit| unit.tenant_id == tenant_id))
+        .map(|unit| unit.id)
+}
+
+fn ensure_default_org_unit(state: &mut State, tenant_id: &str) -> Uuid {
+    if let Some(existing_id) = tenant_primary_org_unit_id(state, tenant_id) {
+        return existing_id;
+    }
+
+    let org_unit = OrgUnit {
+        id: Uuid::new_v4(),
+        tenant_id: tenant_id.to_string(),
+        name: "Operations".to_string(),
+        unit_type: "department".to_string(),
+        parent_id: None,
+        metadata: None,
+    };
+    let org_unit_id = org_unit.id;
+    state.org_units.push(org_unit);
+    org_unit_id
+}
+
+fn actions_from_pack(tenant_id: &str, pack: &OperationalPack, org_units: &[OrgUnit]) -> Vec<ActionDefinition> {
+    let fallback_org_unit_id = org_units
+        .iter()
+        .find(|unit| unit.parent_id.is_none())
+        .or_else(|| org_units.first())
+        .map(|unit| unit.id)
+        .unwrap_or_else(Uuid::new_v4);
+
     pack.actions
         .iter()
         .map(|action| ActionDefinition {
@@ -570,6 +729,12 @@ fn actions_from_pack(tenant_id: &str, pack: &OperationalPack) -> Vec<ActionDefin
                 .iter()
                 .map(|classification_type| classification_type.to_string())
                 .collect(),
+            assigned_org_unit_id: org_units
+                .iter()
+                .find(|unit| unit.name == pack_action_org_unit_name(pack, action.name))
+                .map(|unit| unit.id)
+                .unwrap_or(fallback_org_unit_id),
+            default_owner_role: None,
             active: true,
         })
         .collect()
@@ -591,6 +756,7 @@ fn classifications_from_pack(
 
 fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
     if state.tenants.iter().any(|tenant| tenant.id == tenant_id) {
+        let _ = ensure_default_org_unit(state, tenant_id);
         return;
     }
 
@@ -602,6 +768,7 @@ fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
         industry: "General".to_string(),
     };
     state.tenants.push(tenant);
+    let _ = ensure_default_org_unit(state, tenant_id);
 }
 
 fn tenant_recommendations(
@@ -636,7 +803,13 @@ fn tenant_recommendations(
     };
 
     let pack = load_pack(&tenant.vertical, &tenant.industry);
-    actions_from_pack(tenant_id, &pack)
+    let tenant_org_units: Vec<OrgUnit> = state
+        .org_units
+        .iter()
+        .filter(|unit| unit.tenant_id == tenant_id)
+        .cloned()
+        .collect();
+    actions_from_pack(tenant_id, &pack, &tenant_org_units)
         .iter()
         .filter(|action| {
             action
@@ -650,6 +823,63 @@ fn tenant_recommendations(
             action_type: ActionType::from_category(&action.category),
         })
         .collect()
+}
+
+fn build_routing_path(state: &State, assigned_org_unit_id: Uuid) -> Vec<Uuid> {
+    let mut path = Vec::new();
+    let mut current = Some(assigned_org_unit_id);
+
+    while let Some(org_unit_id) = current {
+        path.push(org_unit_id);
+        current = state
+            .org_units
+            .iter()
+            .find(|unit| unit.id == org_unit_id)
+            .and_then(|unit| unit.parent_id);
+    }
+
+    path.reverse();
+    path
+}
+
+fn route_work_item(
+    state: &mut State,
+    tenant_id: &str,
+    classification_type: &str,
+    recommendations: &[RecommendedAction],
+) -> (Uuid, Vec<Uuid>) {
+    let route_from_state_action = |state: &State, action_name: &str| {
+        state
+            .actions
+            .iter()
+            .find(|action| action.tenant_id == tenant_id && action.active && action.name == action_name)
+            .map(|action| action.assigned_org_unit_id)
+    };
+
+    for recommendation in recommendations {
+        if let Some(assigned_org_unit_id) = route_from_state_action(state, &recommendation.title) {
+            return (assigned_org_unit_id, build_routing_path(state, assigned_org_unit_id));
+        }
+    }
+
+    if let Some(assigned_org_unit_id) = state
+        .actions
+        .iter()
+        .find(|action| {
+            action.tenant_id == tenant_id
+                && action.active
+                && action
+                    .classification_types
+                    .iter()
+                    .any(|action_classification| action_classification == classification_type)
+        })
+        .map(|action| action.assigned_org_unit_id)
+    {
+        return (assigned_org_unit_id, build_routing_path(state, assigned_org_unit_id));
+    }
+
+    let fallback_org_unit_id = ensure_default_org_unit(state, tenant_id);
+    (fallback_org_unit_id, build_routing_path(state, fallback_org_unit_id))
 }
 
 fn create_inbox_item(
@@ -738,6 +968,12 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
         classification_result.recommendations =
             recommendation_engine.generate(&classification_result);
     }
+    let (assigned_org_unit_id, routing_path) = route_work_item(
+        state,
+        &inbox_item.tenant_id,
+        &classification_result.classification,
+        &classification_result.recommendations,
+    );
     let work_item = WorkItem {
         id: Uuid::new_v4(),
         tenant_id: inbox_item.tenant_id.clone(),
@@ -746,6 +982,9 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
         title: classification_title(&classification_result.classification).to_string(),
         summary: classification_result.reason.clone(),
         status: "open".to_string(),
+        assigned_org_unit_id,
+        current_owner_id: None,
+        routing_path,
         recommended_actions: classification_result.recommendations.clone(),
     };
 
@@ -838,6 +1077,10 @@ struct ConvexWorkArgs {
     title: String,
     summary: String,
     status: String,
+    assigned_org_unit_external_id: String,
+    current_owner_id: Option<String>,
+    routing_path_external_ids: Vec<String>,
+    routing_action_name: Option<String>,
     recommended_actions: Vec<ConvexRecommendedAction>,
 }
 
@@ -990,6 +1233,14 @@ async fn forward_work_to_convex(
             title: work_item.title.clone(),
             summary: work_item.summary.clone(),
             status: work_item.status.clone(),
+            assigned_org_unit_external_id: work_item.assigned_org_unit_id.to_string(),
+            current_owner_id: work_item.current_owner_id.clone(),
+            routing_path_external_ids: work_item
+                .routing_path
+                .iter()
+                .map(Uuid::to_string)
+                .collect(),
+            routing_action_name: work_item.recommended_actions.first().map(|action| action.title.clone()),
             recommended_actions: work_item
                 .recommended_actions
                 .iter()
@@ -1383,8 +1634,10 @@ async fn create_tenant(
         vertical: pack.vertical.to_string(),
         industry: pack.industry.to_string(),
     };
+    let org_units = org_units_from_pack(&id, &pack);
     state.tenants.push(tenant.clone());
-    state.actions.extend(actions_from_pack(&id, &pack));
+    state.org_units.extend(org_units.clone());
+    state.actions.extend(actions_from_pack(&id, &pack, &org_units));
     state
         .classifications
         .extend(classifications_from_pack(&id, &pack));
@@ -1397,6 +1650,54 @@ async fn create_tenant(
 async fn list_tenants(data: web::Data<AppState>) -> impl Responder {
     let state = lock_state(&data);
     HttpResponse::Ok().json(&state.tenants)
+}
+
+async fn list_org_units(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let state = lock_state(&data);
+    let org_units: Vec<OrgUnit> = state
+        .org_units
+        .iter()
+        .filter(|org_unit| org_unit.tenant_id == tenant_id)
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(org_units)
+}
+
+async fn create_org_unit(
+    data: web::Data<AppState>,
+    request: web::Json<CreateOrgUnitRequest>,
+) -> impl Responder {
+    if request.name.trim().is_empty() || request.unit_type.trim().is_empty() {
+        return HttpResponse::BadRequest().body("name and type are required");
+    }
+
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    ensure_tenant_exists(&mut state, &tenant_id);
+
+    if let Some(parent_id) = request.parent_id
+        && !state
+            .org_units
+            .iter()
+            .any(|org_unit| org_unit.id == parent_id && org_unit.tenant_id == tenant_id)
+    {
+        return HttpResponse::BadRequest().body("parentId is invalid for tenant");
+    }
+
+    let org_unit = OrgUnit {
+        id: Uuid::new_v4(),
+        tenant_id,
+        name: request.name.trim().to_string(),
+        unit_type: request.unit_type.trim().to_lowercase(),
+        parent_id: request.parent_id,
+        metadata: request.metadata.clone(),
+    };
+    state.org_units.push(org_unit.clone());
+    HttpResponse::Created().json(org_unit)
 }
 
 async fn create_action(
@@ -1415,6 +1716,19 @@ async fn create_action(
     let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
     let mut state = lock_state(&data);
     ensure_tenant_exists(&mut state, &tenant_id);
+    let assigned_org_unit_id = if let Some(assigned_org_unit_id) = request.assigned_org_unit_id {
+        if state
+            .org_units
+            .iter()
+            .any(|org_unit| org_unit.id == assigned_org_unit_id && org_unit.tenant_id == tenant_id)
+        {
+            assigned_org_unit_id
+        } else {
+            return HttpResponse::BadRequest().body("assignedOrgUnitId is invalid for tenant");
+        }
+    } else {
+        ensure_default_org_unit(&mut state, &tenant_id)
+    };
 
     let action = ActionDefinition {
         id: Uuid::new_v4(),
@@ -1428,6 +1742,13 @@ async fn create_action(
             .map(|classification| classification.trim().to_lowercase())
             .filter(|classification| !classification.is_empty())
             .collect(),
+        assigned_org_unit_id,
+        default_owner_role: request
+            .default_owner_role
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         active: request.active.unwrap_or(true),
     };
 
@@ -1468,7 +1789,13 @@ async fn list_actions(data: web::Data<AppState>, query: web::Query<ActionQuery>)
     if actions.is_empty() {
         if let Some(tenant) = state.tenants.iter().find(|tenant| tenant.id == tenant_id) {
             let pack = load_pack(&tenant.vertical, &tenant.industry);
-            actions = actions_from_pack(&tenant_id, &pack)
+            let tenant_org_units: Vec<OrgUnit> = state
+                .org_units
+                .iter()
+                .filter(|unit| unit.tenant_id == tenant_id)
+                .cloned()
+                .collect();
+            actions = actions_from_pack(&tenant_id, &pack, &tenant_org_units)
                 .into_iter()
                 .filter(|action| {
                     if let Some(classification_type) = &classification_type {
@@ -1515,6 +1842,72 @@ async fn list_work(
         .cloned()
         .collect();
     HttpResponse::Ok().json(work_items)
+}
+
+async fn work_routing_preview(
+    data: web::Data<AppState>,
+    query: web::Query<RoutingPreviewQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let classification_type = query
+        .classification_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("operational_request")
+        .to_string();
+    let action_name = query
+        .action_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let state = lock_state(&data);
+    let selected_action = if let Some(action_name) = action_name.as_deref() {
+        state.actions.iter().find(|action| {
+            action.tenant_id == tenant_id && action.active && action.name.eq_ignore_ascii_case(action_name)
+        })
+    } else {
+        state.actions.iter().find(|action| {
+            action.tenant_id == tenant_id
+                && action.active
+                && action
+                    .classification_types
+                    .iter()
+                    .any(|action_classification| action_classification == &classification_type)
+        })
+    };
+    let assigned_org_unit = selected_action.and_then(|action| {
+        state
+            .org_units
+            .iter()
+            .find(|org_unit| org_unit.id == action.assigned_org_unit_id)
+            .cloned()
+    });
+    let routing_path = assigned_org_unit
+        .as_ref()
+        .map(|org_unit| {
+            build_routing_path(&state, org_unit.id)
+                .into_iter()
+                .filter_map(|org_unit_id| {
+                    state
+                        .org_units
+                        .iter()
+                        .find(|org_unit| org_unit.id == org_unit_id)
+                        .cloned()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    HttpResponse::Ok().json(WorkRoutingPreview {
+        tenant_id,
+        classification_type,
+        action_name,
+        assigned_org_unit,
+        routing_path,
+    })
 }
 
 async fn select_work_action(
@@ -1699,11 +2092,14 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/extract", web::post().to(extract))
         .route("/tenants", web::get().to(list_tenants))
         .route("/tenants", web::post().to(create_tenant))
+        .route("/org/units", web::get().to(list_org_units))
+        .route("/org/units", web::post().to(create_org_unit))
         .route("/actions", web::get().to(list_actions))
         .route("/actions", web::post().to(create_action))
         .route("/items", web::get().to(list_items))
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
+        .route("/work/routing-preview", web::get().to(work_routing_preview))
         .route("/work/{id}/selection", web::post().to(select_work_action))
         .route("/work/{id}/outcome", web::post().to(record_work_outcome))
         .route("/webhooks/postmark", web::post().to(postmark_inbound));
@@ -1766,6 +2162,7 @@ mod tests {
         assert_eq!(work_item.inbox_item_id, inbox_item.id);
         assert_eq!(work_item.title, "Maintenance Request");
         assert_eq!(work_item.status, "open");
+        assert!(!work_item.routing_path.is_empty());
         assert_eq!(work_item.recommended_actions.len(), 3);
         assert_eq!(work_item.recommended_actions[0].title, "Inspect HVAC Unit");
         assert_eq!(items[0].status, "work_generated");
@@ -2067,6 +2464,11 @@ mod tests {
                 .iter()
                 .any(|action| action.name == "Dispatch Maintenance Vendor")
         );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.name == "Dispatch Maintenance Vendor" && action.assigned_org_unit_id != Uuid::nil())
+        );
     }
 
     #[actix_web::test]
@@ -2109,5 +2511,24 @@ mod tests {
                 .iter()
                 .any(|action| action.title == "Schedule Appointment")
         );
+    }
+
+    #[actix_web::test]
+    async fn org_units_and_routing_preview_endpoints_return_routing_context() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let org_units_req = test::TestRequest::get()
+            .uri("/org/units?tenantId=default")
+            .to_request();
+        let org_units: Vec<OrgUnit> = test::call_and_read_body_json(&app, org_units_req).await;
+        assert!(!org_units.is_empty());
+
+        let preview_req = test::TestRequest::get()
+            .uri("/work/routing-preview?tenantId=default&classificationType=maintenance_request")
+            .to_request();
+        let preview: WorkRoutingPreview = test::call_and_read_body_json(&app, preview_req).await;
+        assert_eq!(preview.classification_type, "maintenance_request");
+        assert!(preview.assigned_org_unit.is_some());
+        assert!(!preview.routing_path.is_empty());
     }
 }

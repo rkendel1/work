@@ -29,6 +29,9 @@ export type WorkItem = {
   title: string;
   summary: string;
   status: string;
+  assigned_org_unit_id: string;
+  current_owner_id?: string;
+  routing_path: string[];
   recommended_actions?: IngressRecommendedAction[];
 };
 
@@ -46,7 +49,24 @@ type ActionDefinition = {
   description: string;
   category: string;
   classification_types: string[];
+  assigned_org_unit_id: string;
+  default_owner_role?: string;
   active: boolean;
+};
+
+type OrgUnit = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  type: string;
+  parent_id?: string;
+};
+
+type WorkRoutingPreview = {
+  classification_type: string;
+  action_name?: string | null;
+  assigned_org_unit?: OrgUnit | null;
+  routing_path: OrgUnit[];
 };
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -62,7 +82,7 @@ type InboxClientProps = {
   initialWorkItems: WorkItem[];
 };
 
-type Tab = "inbox" | "work" | "actions" | "settings";
+type Tab = "inbox" | "work" | "actions" | "organization" | "settings";
 
 type SetupPack = {
   vertical: string;
@@ -128,6 +148,7 @@ export function InboxClient({
     },
   ]);
   const [actions, setActions] = useState<ActionDefinition[]>([]);
+  const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
   const [selectedInboxId, setSelectedInboxId] = useState<string | null>(
     initialInboxItems[0]?.id ?? null,
   );
@@ -140,6 +161,8 @@ export function InboxClient({
   const [newActionClassification, setNewActionClassification] = useState(
     "maintenance_request",
   );
+  const [newActionOrgUnitId, setNewActionOrgUnitId] = useState("");
+  const [newActionDefaultOwnerRole, setNewActionDefaultOwnerRole] = useState("");
   const [tenantName, setTenantName] = useState("");
   const [tenantVertical, setTenantVertical] = useState(SETUP_PACKS[0].vertical);
   const [tenantIndustry, setTenantIndustry] = useState(SETUP_PACKS[0].industries[0]);
@@ -149,21 +172,32 @@ export function InboxClient({
   const [outcomeStatusByWork, setOutcomeStatusByWork] = useState<Record<string, string>>({});
   const [outcomeFeedbackByWork, setOutcomeFeedbackByWork] = useState<Record<string, string>>({});
   const [outcomeNotesByWork, setOutcomeNotesByWork] = useState<Record<string, string>>({});
+  const [orgUnitName, setOrgUnitName] = useState("");
+  const [orgUnitType, setOrgUnitType] = useState("team");
+  const [orgUnitParentId, setOrgUnitParentId] = useState("");
+  const [routingPreviewClassification, setRoutingPreviewClassification] = useState(
+    "maintenance_request",
+  );
+  const [routingPreviewActionName, setRoutingPreviewActionName] = useState("");
+  const [routingPreview, setRoutingPreview] = useState<WorkRoutingPreview | null>(null);
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
   const refresh = useCallback(async () => {
     const tenantQuery = `tenantId=${encodeURIComponent(tenantId)}`;
-    const [items, work, tenantList, actionList] = await Promise.all([
+    const [items, work, tenantList, actionList, orgUnitList] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
       fetchJson<Tenant[]>("/api/tenants"),
       fetchJson<ActionDefinition[]>(`/api/actions?${tenantQuery}`),
+      fetchJson<OrgUnit[]>(`/api/org/units?${tenantQuery}`),
     ]);
     setInboxItems(items);
     setWorkItems(work);
     setTenants(tenantList);
     setActions(actionList);
+    setOrgUnits(orgUnitList);
+    setNewActionOrgUnitId((current) => current || orgUnitList[0]?.id || "");
     setSelectedInboxId((current) => {
       if (current && items.some((item) => item.id === current)) {
         return current;
@@ -244,6 +278,8 @@ export function InboxClient({
         description: newActionDescription,
         category: newActionCategory,
         classificationTypes: [newActionClassification],
+        assignedOrgUnitId: newActionOrgUnitId || undefined,
+        defaultOwnerRole: newActionDefaultOwnerRole || undefined,
         active: true,
       }),
     });
@@ -255,6 +291,7 @@ export function InboxClient({
 
     setNewActionName("");
     setNewActionDescription("");
+    setNewActionDefaultOwnerRole("");
     await refresh();
   }
 
@@ -341,6 +378,73 @@ export function InboxClient({
     await refresh();
   }
 
+  async function onCreateOrgUnit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const response = await fetch("/api/org/units", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        name: orgUnitName,
+        type: orgUnitType,
+        parentId: orgUnitParentId || undefined,
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setOrgUnitName("");
+    setOrgUnitParentId("");
+    await refresh();
+  }
+
+  async function loadRoutingPreview(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const query = new URLSearchParams({
+      tenantId,
+      classificationType: routingPreviewClassification,
+    });
+    if (routingPreviewActionName.trim()) {
+      query.set("actionName", routingPreviewActionName.trim());
+    }
+
+    try {
+      const preview = await fetchJson<WorkRoutingPreview>(
+        `/api/work/routing-preview?${query.toString()}`,
+      );
+      setRoutingPreview(preview);
+    } catch (previewError) {
+      setRoutingPreview(null);
+      setError(previewError instanceof Error ? previewError.message : "Failed loading routing");
+    }
+  }
+
+  function orgUnitById(orgUnitId: string) {
+    return orgUnits.find((orgUnit) => orgUnit.id === orgUnitId);
+  }
+
+  function formatRoutingPath(path: string[]) {
+    const names = path
+      .map((orgUnitId) => orgUnitById(orgUnitId)?.name)
+      .filter((name): name is string => Boolean(name));
+    return names.join(" / ");
+  }
+
+  function routingPathForOrgUnit(orgUnitId: string) {
+    const path: string[] = [];
+    let currentId: string | undefined = orgUnitId;
+    while (currentId) {
+      path.push(currentId);
+      currentId = orgUnitById(currentId)?.parent_id;
+    }
+    return path.reverse();
+  }
+
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
 
@@ -349,7 +453,7 @@ export function InboxClient({
       <header className="space-y-3">
         <h1 className="text-3xl font-semibold">Operations Inbox</h1>
         <div className="flex flex-wrap items-center gap-2">
-          {(["inbox", "work", "actions", "settings"] as Tab[]).map((name) => (
+          {(["inbox", "work", "actions", "organization", "settings"] as Tab[]).map((name) => (
             <button
               key={name}
               type="button"
@@ -445,6 +549,13 @@ export function InboxClient({
                       <div className="rounded border p-3">
                         <p className="font-medium">{selectedWork.title}</p>
                         <p className="text-zinc-700">{selectedWork.summary}</p>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          Classification: {selectedWork.classification_type}
+                        </p>
+                        <p className="text-xs text-zinc-500">
+                          Assigned Team:{" "}
+                          {orgUnitById(selectedWork.assigned_org_unit_id)?.name ?? "Unassigned"}
+                        </p>
                       </div>
                       <IngressRecommendationsCard
                         recommendations={selectedWork.recommended_actions ?? []}
@@ -474,6 +585,12 @@ export function InboxClient({
                 <p className="text-zinc-700">{work.summary}</p>
                 <p className="mt-1 text-xs text-zinc-500">
                   Classification: {work.classification_type}
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Assigned Team: {orgUnitById(work.assigned_org_unit_id)?.name ?? "Unassigned"}
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Location in Org: {formatRoutingPath(work.routing_path) || "Not routed"}
                 </p>
                 <div className="mt-3 rounded border bg-zinc-50 p-3">
                   <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
@@ -586,6 +703,24 @@ export function InboxClient({
               placeholder="Description"
               required
             />
+            <select
+              value={newActionOrgUnitId}
+              onChange={(event) => setNewActionOrgUnitId(event.target.value)}
+              className="rounded border px-3 py-2"
+              required
+            >
+              {orgUnits.map((orgUnit) => (
+                <option key={orgUnit.id} value={orgUnit.id}>
+                  {orgUnit.name} ({orgUnit.type})
+                </option>
+              ))}
+            </select>
+            <input
+              value={newActionDefaultOwnerRole}
+              onChange={(event) => setNewActionDefaultOwnerRole(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Default Owner Role (optional)"
+            />
             <button type="submit" className="rounded bg-black px-4 py-2 text-white">
               Add Action
             </button>
@@ -598,9 +733,96 @@ export function InboxClient({
                 <p className="text-xs text-zinc-500">
                   {action.category} • {action.classification_types.join(", ")}
                 </p>
+                <p className="text-xs text-zinc-500">
+                  Assigned Team:{" "}
+                  {orgUnitById(action.assigned_org_unit_id)?.name ?? "Unknown team"}
+                  {action.default_owner_role ? ` • Owner Role: ${action.default_owner_role}` : ""}
+                </p>
               </div>
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {tab === "organization" ? (
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-lg font-semibold">Organization Model</h2>
+          <form onSubmit={onCreateOrgUnit} className="grid gap-2 md:grid-cols-4">
+            <input
+              value={orgUnitName}
+              onChange={(event) => setOrgUnitName(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Org Unit Name"
+              required
+            />
+            <select
+              value={orgUnitType}
+              onChange={(event) => setOrgUnitType(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="department">Department</option>
+              <option value="team">Team</option>
+              <option value="vendor">Vendor</option>
+              <option value="role">Role</option>
+              <option value="location">Location</option>
+            </select>
+            <select
+              value={orgUnitParentId}
+              onChange={(event) => setOrgUnitParentId(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="">No Parent</option>
+              {orgUnits.map((orgUnit) => (
+                <option key={orgUnit.id} value={orgUnit.id}>
+                  {orgUnit.name}
+                </option>
+              ))}
+            </select>
+            <button type="submit" className="rounded bg-black px-4 py-2 text-white">
+              Add Org Unit
+            </button>
+          </form>
+
+          <div className="rounded border p-3 text-sm">
+            <p className="mb-2 font-medium">Current Org Structure</p>
+            <div className="space-y-1 text-zinc-700">
+              {orgUnits.map((orgUnit) => (
+                <p key={orgUnit.id}>
+                  {formatRoutingPath(routingPathForOrgUnit(orgUnit.id)) || orgUnit.name}
+                </p>
+              ))}
+            </div>
+          </div>
+
+          <form onSubmit={loadRoutingPreview} className="grid gap-2 md:grid-cols-4">
+            <input
+              value={routingPreviewClassification}
+              onChange={(event) => setRoutingPreviewClassification(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Classification Type"
+              required
+            />
+            <input
+              value={routingPreviewActionName}
+              onChange={(event) => setRoutingPreviewActionName(event.target.value)}
+              className="rounded border px-3 py-2"
+              placeholder="Action Name (optional)"
+            />
+            <button type="submit" className="rounded bg-zinc-900 px-4 py-2 text-white md:col-span-2">
+              Preview Routing
+            </button>
+          </form>
+          {routingPreview ? (
+            <div className="rounded border bg-zinc-50 p-3 text-sm">
+              <p>Classification: {routingPreview.classification_type}</p>
+              <p>Action: {routingPreview.action_name ?? "Auto-selected"}</p>
+              <p>Assigned Team: {routingPreview.assigned_org_unit?.name ?? "No route found"}</p>
+              <p>
+                Location in Org:{" "}
+                {routingPreview.routing_path.map((orgUnit) => orgUnit.name).join(" / ") || "N/A"}
+              </p>
+            </div>
+          ) : null}
         </section>
       ) : null}
 

@@ -12,6 +12,7 @@ type OperationalPack = {
     name: string;
     description: string;
     classificationTypes: string[];
+    assignedOrgUnitName: string;
   }>;
 };
 
@@ -46,31 +47,37 @@ const OPERATIONAL_PACKS: OperationalPack[] = [
         name: "Inspect HVAC Unit",
         description: "Send technician to inspect HVAC equipment.",
         classificationTypes: ["maintenance_request"],
+        assignedOrgUnitName: "HVAC Team",
       },
       {
         name: "Dispatch Maintenance Vendor",
         description: "Coordinate approved vendor dispatch for maintenance.",
         classificationTypes: ["maintenance_request", "vendor_coordination"],
+        assignedOrgUnitName: "Plumbing Vendor",
       },
       {
         name: "Respond to Tenant",
         description: "Provide tenant response and expected next steps.",
         classificationTypes: ["tenant_complaint", "lease_question"],
+        assignedOrgUnitName: "Front Desk",
       },
       {
         name: "Schedule Inspection",
         description: "Schedule onsite inspection with operations staff.",
         classificationTypes: ["maintenance_request", "access_request"],
+        assignedOrgUnitName: "Maintenance",
       },
       {
         name: "Create Work Order",
         description: "Open a tracked work order for follow-up.",
         classificationTypes: ["tenant_complaint"],
+        assignedOrgUnitName: "Maintenance",
       },
       {
         name: "Escalate to Property Manager",
         description: "Escalate high-priority case to property management.",
         classificationTypes: ["tenant_complaint", "lease_question"],
+        assignedOrgUnitName: "Operations",
       },
     ],
   },
@@ -100,21 +107,25 @@ const OPERATIONAL_PACKS: OperationalPack[] = [
         name: "Schedule Appointment",
         description: "Schedule patient appointment with available slots.",
         classificationTypes: ["appointment_request", "scheduling_request"],
+        assignedOrgUnitName: "Reception",
       },
       {
         name: "Notify Clinical Staff",
         description: "Notify clinical team about patient issue.",
         classificationTypes: ["patient_issue"],
+        assignedOrgUnitName: "Clinical Staff",
       },
       {
         name: "Resolve Billing Inquiry",
         description: "Resolve billing and claims inquiries.",
         classificationTypes: ["billing_question", "billing_inquiry"],
+        assignedOrgUnitName: "Billing",
       },
       {
         name: "Escalate to Provider",
         description: "Escalate patient concern to provider.",
         classificationTypes: ["patient_issue"],
+        assignedOrgUnitName: "Clinical Staff",
       },
     ],
   },
@@ -130,6 +141,40 @@ function labelFromSystemTerm(systemTerm: string) {
     .filter(Boolean)
     .map((segment) => `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`)
     .join(" ");
+}
+
+function orgUnitTemplatesForPack(pack: OperationalPack) {
+  if (
+    normalizeOperationalKey(pack.vertical) === "property management" &&
+    normalizeOperationalKey(pack.industry) === "commercial real estate"
+  ) {
+    return [
+      { name: "Operations", type: "department" },
+      { name: "Maintenance", type: "team", parentName: "Operations" },
+      { name: "HVAC Team", type: "team", parentName: "Maintenance" },
+      { name: "Plumbing Vendor", type: "vendor", parentName: "Maintenance" },
+      { name: "Leasing", type: "team", parentName: "Operations" },
+      { name: "Front Desk", type: "team", parentName: "Operations" },
+    ];
+  }
+
+  if (
+    normalizeOperationalKey(pack.vertical) === "healthcare" &&
+    normalizeOperationalKey(pack.industry) === "clinic"
+  ) {
+    return [
+      { name: "Clinic Operations", type: "department" },
+      { name: "Reception", type: "team", parentName: "Clinic Operations" },
+      { name: "Clinical Staff", type: "team", parentName: "Clinic Operations" },
+      { name: "Billing", type: "team", parentName: "Clinic Operations" },
+      { name: "Compliance", type: "team", parentName: "Clinic Operations" },
+    ];
+  }
+
+  return [
+    { name: "Operations", type: "department" },
+    { name: "General Team", type: "team", parentName: "Operations" },
+  ];
 }
 
 function loadOperationalPack(vertical: string, industry: string): OperationalPack {
@@ -159,6 +204,7 @@ function loadOperationalPack(vertical: string, industry: string): OperationalPac
         name: "Review Operational Signal",
         description: "Review incoming signal and choose next operational step.",
         classificationTypes: ["operational_request"],
+        assignedOrgUnitName: "Operations",
       },
     ],
   };
@@ -181,8 +227,29 @@ export const createTenant = mutationGeneric({
       return existing._id;
     }
 
-    const tenantId = await ctx.db.insert("tenants", args);
+    const tenantRecordId = await ctx.db.insert("tenants", args);
     const pack = loadOperationalPack(args.vertical, args.industry);
+    const orgUnitIdsByName = new Map<string, string>();
+    for (const template of orgUnitTemplatesForPack(pack)) {
+      const existing = await ctx.db
+        .query("org_units")
+        .withIndex("by_tenant_name", (query) => query.eq("tenantId", args.id))
+        .filter((query) => query.eq(query.field("name"), template.name))
+        .first();
+      if (existing) {
+        orgUnitIdsByName.set(template.name, existing._id);
+        continue;
+      }
+      const parentId = template.parentName ? orgUnitIdsByName.get(template.parentName) : undefined;
+      const unitId = await ctx.db.insert("org_units", {
+        tenantId: args.id,
+        name: template.name,
+        type: template.type,
+        parentId,
+      });
+      orgUnitIdsByName.set(template.name, unitId);
+    }
+    const fallbackOrgUnitId = orgUnitIdsByName.values().next().value;
     const existingPack = await ctx.db
       .query("operational_packs")
       .withIndex("by_vertical_industry", (query) => query.eq("vertical", pack.vertical))
@@ -230,12 +297,18 @@ export const createTenant = mutationGeneric({
         .filter((query) => query.eq(query.field("name"), action.name))
         .first();
       if (!existing) {
+        const assignedOrgUnitId =
+          orgUnitIdsByName.get(action.assignedOrgUnitName) ?? fallbackOrgUnitId;
+        if (!assignedOrgUnitId) {
+          continue;
+        }
         await ctx.db.insert("actions", {
           tenantId: args.id,
           name: action.name,
           description: action.description,
           category: "pack",
           classificationTypes: action.classificationTypes,
+          assignedOrgUnitId,
           active: true,
         });
       }
@@ -255,7 +328,7 @@ export const createTenant = mutationGeneric({
         });
       }
     }
-    return tenantId;
+    return tenantRecordId;
   },
 });
 
@@ -273,6 +346,8 @@ export const createAction = mutationGeneric({
     description: v.string(),
     category: v.string(),
     classificationTypes: v.array(v.string()),
+    assignedOrgUnitId: v.id("org_units"),
+    defaultOwnerRole: v.optional(v.string()),
     active: v.boolean(),
   },
   handler: async (ctx, args) => {
@@ -338,6 +413,27 @@ export const bootstrapTenantFromPack = mutationGeneric({
   },
   handler: async (ctx, args) => {
     const pack = loadOperationalPack(args.vertical, args.industry);
+    const orgUnitIdsByName = new Map<string, string>();
+    for (const template of orgUnitTemplatesForPack(pack)) {
+      const existing = await ctx.db
+        .query("org_units")
+        .withIndex("by_tenant_name", (query) => query.eq("tenantId", args.tenantId))
+        .filter((query) => query.eq(query.field("name"), template.name))
+        .first();
+      if (existing) {
+        orgUnitIdsByName.set(template.name, existing._id);
+        continue;
+      }
+      const parentId = template.parentName ? orgUnitIdsByName.get(template.parentName) : undefined;
+      const unitId = await ctx.db.insert("org_units", {
+        tenantId: args.tenantId,
+        name: template.name,
+        type: template.type,
+        parentId,
+      });
+      orgUnitIdsByName.set(template.name, unitId);
+    }
+    const fallbackOrgUnitId = orgUnitIdsByName.values().next().value;
     const existingPack = await ctx.db
       .query("operational_packs")
       .withIndex("by_vertical_industry", (query) => query.eq("vertical", pack.vertical))
@@ -385,12 +481,18 @@ export const bootstrapTenantFromPack = mutationGeneric({
         .filter((query) => query.eq(query.field("name"), action.name))
         .first();
       if (!existing) {
+        const assignedOrgUnitId =
+          orgUnitIdsByName.get(action.assignedOrgUnitName) ?? fallbackOrgUnitId;
+        if (!assignedOrgUnitId) {
+          continue;
+        }
         await ctx.db.insert("actions", {
           tenantId: args.tenantId,
           name: action.name,
           description: action.description,
           category: "pack",
           classificationTypes: action.classificationTypes,
+          assignedOrgUnitId,
           active: true,
         });
       }
