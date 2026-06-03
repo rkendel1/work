@@ -79,9 +79,17 @@ function requiredEnv(name) {
   return value.trim();
 }
 
+function normalizeConvexAdminKey(rawValue) {
+  const withoutQuotes = rawValue.replace(/^['"]|['"]$/g, "");
+  return withoutQuotes.replace(/^(?:Convex|Bearer)(?:\s+|$)/i, "").trim();
+}
+
 async function convexMutation(path, args) {
   const deploymentUrl = requiredEnv("CONVEX_DEPLOYMENT_URL");
-  const adminKey = requiredEnv("CONVEX_ADMIN_KEY");
+  const adminKey = normalizeConvexAdminKey(requiredEnv("CONVEX_ADMIN_KEY"));
+  if (!adminKey) {
+    throw new Error("CONVEX_ADMIN_KEY is empty after removing optional authorization prefixes");
+  }
   const response = await fetch(`${deploymentUrl.replace(/\/$/, "")}/api/mutation`, {
     method: "POST",
     headers: {

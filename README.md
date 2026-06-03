@@ -146,10 +146,12 @@ npm run build:wasm
 ```bash
 cd /tmp/workspace/rkendel1/work
 CONVEX_DEPLOYMENT_URL=https://<deployment>.convex.cloud \
-CONVEX_ADMIN_KEY=<admin-key> \
+CONVEX_ADMIN_KEY=<raw-admin-key> \
 CLERK_SECRET_KEY=<clerk-secret-key> \
 npm run seed:simulation
 ```
+
+Use the raw Convex admin key value (no leading auth scheme prefix).
 
 If you run locally without exporting env vars inline, the script automatically loads
 `/tmp/workspace/rkendel1/work/apps/web/.env.local`.
