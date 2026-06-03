@@ -190,18 +190,28 @@ export default defineSchema({
   })
     .index("by_work_item_completed_at", ["workItemId", "completedAt"])
     .index("by_tenant_completed_at", ["tenantId", "completedAt"]),
-  action_executions: defineTable({
+  execution_results: defineTable({
     tenantId: v.string(),
     workItemId: v.id("work_items"),
-    actionId: v.id("actions"),
+    executedBy: v.string(),
+    executionType: v.string(),
     status: v.string(),
-    provider: v.string(),
-    externalRef: v.optional(v.string()),
+    resultType: v.string(),
+    summary: v.string(),
     payload: v.any(),
-    executedAt: v.optional(v.number()),
+    sideEffects: v.array(
+      v.object({
+        type: v.string(),
+        targetSystem: v.optional(v.string()),
+        targetId: v.optional(v.string()),
+        description: v.string(),
+      }),
+    ),
+    contextSnapshot: v.any(),
+    timestamp: v.number(),
   })
-    .index("by_work_item", ["workItemId"])
-    .index("by_tenant", ["tenantId"]),
+    .index("by_work_item_timestamp", ["workItemId", "timestamp"])
+    .index("by_tenant_timestamp", ["tenantId", "timestamp"]),
   assignments: defineTable({
     tenantId: v.string(),
     entityType: v.string(),

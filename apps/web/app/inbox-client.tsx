@@ -127,7 +127,19 @@ type ActionExecution = {
   tenant_id: string;
   work_item_id: string;
   action_id: string;
+  executed_by: string;
+  execution_type: string;
   status: string;
+  result_type: string;
+  summary: string;
+  side_effects: Array<{
+    type: string;
+    target_system?: string;
+    target_id?: string;
+    description: string;
+  }>;
+  context_snapshot: unknown;
+  timestamp: number;
   provider: string;
   external_ref?: string;
   payload: unknown;
@@ -1163,7 +1175,8 @@ export function InboxClient({
                         <p key={execution.id}>
                           {execution.status === "success" ? "✔" : execution.status === "failed" ? "✖" : "…" }{" "}
                           {execution.provider.toUpperCase()} {execution.status}
-                          {execution.message ? ` — ${execution.message}` : ""}
+                          {execution.summary ? ` — ${execution.summary}` : execution.message ? ` — ${execution.message}` : ""}
+                          {execution.side_effects?.length ? ` (${execution.side_effects.map((effect) => effect.description).join("; ")})` : ""}
                         </p>
                       ))}
                     </div>

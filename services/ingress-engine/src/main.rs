@@ -318,12 +318,28 @@ struct TenantSecret {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ActionExecution {
+struct ExecutionSideEffect {
+    #[serde(rename = "type")]
+    side_effect_type: String,
+    target_system: Option<String>,
+    target_id: Option<String>,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExecutionResultRecord {
     id: Uuid,
     tenant_id: String,
     work_item_id: Uuid,
     action_id: Uuid,
+    executed_by: String,
+    execution_type: String,
     status: String,
+    result_type: String,
+    summary: String,
+    side_effects: Vec<ExecutionSideEffect>,
+    context_snapshot: Value,
+    timestamp: i64,
     provider: String,
     external_ref: Option<String>,
     payload: Value,
@@ -514,7 +530,7 @@ struct ExecutionListQuery {
 }
 
 #[derive(Debug, Clone)]
-struct ExecutionResult {
+struct ExecutorOutcome {
     status: String,
     external_ref: Option<String>,
     message: Option<String>,
@@ -527,7 +543,7 @@ trait ActionExecutor {
         work: &WorkItem,
         payload: &Value,
         secrets: &HashMap<String, String>,
-    ) -> ExecutionResult;
+    ) -> ExecutorOutcome;
 }
 
 struct DirectExecutor;
@@ -545,7 +561,7 @@ struct State {
     classifications: Vec<ClassificationDefinition>,
     action_selections: Vec<ActionSelection>,
     work_outcomes: Vec<WorkOutcome>,
-    action_executions: Vec<ActionExecution>,
+    execution_results: Vec<ExecutionResultRecord>,
     behavioral_patterns: Vec<BehavioralPattern>,
     process_nodes: Vec<ProcessNode>,
     process_edges: Vec<ProcessEdge>,
@@ -583,7 +599,7 @@ impl Default for State {
             classifications,
             action_selections: Vec::new(),
             work_outcomes: Vec::new(),
-            action_executions: Vec::new(),
+            execution_results: Vec::new(),
             behavioral_patterns: Vec::new(),
             process_nodes: Vec::new(),
             process_edges: Vec::new(),
@@ -670,7 +686,7 @@ impl ActionExecutor for DirectExecutor {
         work: &WorkItem,
         payload: &Value,
         secrets: &HashMap<String, String>,
-    ) -> ExecutionResult {
+    ) -> ExecutorOutcome {
         let provider = action.execution_provider.as_str();
         let required_secret = match provider {
             "slack" => Some("slack_bot_token"),
@@ -683,7 +699,7 @@ impl ActionExecutor for DirectExecutor {
         if let Some(secret_name) = required_secret
             && !secrets.contains_key(secret_name)
         {
-            return ExecutionResult {
+            return ExecutorOutcome {
                 status: "failed".to_string(),
                 external_ref: None,
                 message: Some(format!("missing required secret `{secret_name}`")),
@@ -697,7 +713,7 @@ impl ActionExecutor for DirectExecutor {
             .map(str::to_string)
             .unwrap_or(default_message);
 
-        ExecutionResult {
+        ExecutorOutcome {
             status: "success".to_string(),
             external_ref: Some(format!("{provider}-{}", Uuid::new_v4())),
             message: Some(message),
@@ -712,9 +728,9 @@ impl ActionExecutor for NangoExecutor {
         work: &WorkItem,
         payload: &Value,
         secrets: &HashMap<String, String>,
-    ) -> ExecutionResult {
+    ) -> ExecutorOutcome {
         if !secrets.contains_key("nango_connection_id") {
-            return ExecutionResult {
+            return ExecutorOutcome {
                 status: "failed".to_string(),
                 external_ref: None,
                 message: Some("missing required secret `nango_connection_id`".to_string()),
@@ -726,7 +742,7 @@ impl ActionExecutor for NangoExecutor {
             .and_then(Value::as_str)
             .unwrap_or("Nango execution completed");
 
-        ExecutionResult {
+        ExecutorOutcome {
             status: "success".to_string(),
             external_ref: Some(format!("nango-{}", Uuid::new_v4())),
             message: Some(format!("{summary}: {} for {}", action.name, work.id)),
@@ -966,7 +982,10 @@ fn is_valid_feedback(feedback: &str) -> bool {
 }
 
 fn is_valid_execution_status(status: &str) -> bool {
-    matches!(status, "pending" | "running" | "success" | "failed")
+    matches!(
+        status,
+        "pending" | "running" | "success" | "partial" | "failed" | "pending_review"
+    )
 }
 
 fn tenant_secret_summary(secret: &TenantSecret) -> TenantSecretSummary {
@@ -3099,8 +3118,8 @@ async fn execute_action(
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let (execution_id, action, work_item, provider, secrets) = {
-        let mut state = lock_state(&data);
+    let (action, work_item, provider, secrets) = {
+        let state = lock_state(&data);
 
         let Some(work_item) = state
             .work_items
@@ -3148,20 +3167,6 @@ async fn execute_action(
             .unwrap_or(&action.execution_provider)
             .to_lowercase();
 
-        let execution_id = Uuid::new_v4();
-        state.action_executions.push(ActionExecution {
-            id: execution_id,
-            tenant_id: tenant_id.clone(),
-            work_item_id: work_item.id,
-            action_id: action.id,
-            status: "running".to_string(),
-            provider: provider.clone(),
-            external_ref: None,
-            payload: payload.clone(),
-            message: None,
-            executed_at: None,
-        });
-
         let secrets: HashMap<String, String> = state
             .tenant_secrets
             .iter()
@@ -3173,7 +3178,7 @@ async fn execute_action(
             })
             .collect();
 
-        (execution_id, action, work_item, provider, secrets)
+        (action, work_item, provider, secrets)
     };
 
     let executor = executor_for_provider(&provider);
@@ -3182,22 +3187,78 @@ async fn execute_action(
         return HttpResponse::InternalServerError().body("invalid execution status");
     }
 
-    let mut state = lock_state(&data);
-    if let Some(execution) = state
-        .action_executions
-        .iter_mut()
-        .find(|execution| execution.id == execution_id && execution.tenant_id == tenant_id)
-    {
-        execution.status = result.status;
-        execution.external_ref = result.external_ref;
-        execution.message = result.message;
-        execution.executed_at = Some(Utc::now());
-        let response = execution.clone();
-        refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
-        return HttpResponse::Created().json(response);
+    let execution_id = Uuid::new_v4();
+    let executed_at = Utc::now();
+    let summary = result
+        .message
+        .clone()
+        .unwrap_or_else(|| format!("Executed {} via {}", action.name, provider));
+    let result_type = if result.status == "failed" {
+        "no_op".to_string()
+    } else if provider.eq_ignore_ascii_case("internal") {
+        "state_change".to_string()
+    } else {
+        "external_api_call".to_string()
+    };
+    let mut side_effects = vec![ExecutionSideEffect {
+        side_effect_type: "action_execution".to_string(),
+        target_system: Some(provider.clone()),
+        target_id: result.external_ref.clone(),
+        description: summary.clone(),
+    }];
+    if result.status == "failed" {
+        side_effects.push(ExecutionSideEffect {
+            side_effect_type: "execution_failure".to_string(),
+            target_system: Some(provider.clone()),
+            target_id: None,
+            description: "Execution failed before work state transition.".to_string(),
+        });
     }
+    let context_snapshot = serde_json::json!({
+        "classificationType": work_item.classification_type,
+        "priority": work_item.priority,
+        "status": work_item.status,
+        "assignedOrgUnitId": work_item.assigned_org_unit_id,
+        "routingPath": work_item.routing_path,
+        "escalationTarget": work_item.escalation_target,
+        "suppressAction": work_item.suppress_action,
+        "requireApproval": work_item.require_approval,
+        "appliedRules": work_item.applied_rules,
+        "operationalContext": work_item.operational_context,
+    });
+    let execution = ExecutionResultRecord {
+        id: execution_id,
+        tenant_id: tenant_id.clone(),
+        work_item_id: work_item.id,
+        action_id: action.id,
+        executed_by: "system".to_string(),
+        execution_type: if provider.eq_ignore_ascii_case("internal") {
+            "internal_update".to_string()
+        } else {
+            "external_signal".to_string()
+        },
+        status: result.status,
+        result_type,
+        summary: summary.clone(),
+        side_effects,
+        context_snapshot,
+        timestamp: executed_at.timestamp(),
+        provider: provider.clone(),
+        external_ref: result.external_ref,
+        payload: serde_json::json!({
+            "actionName": action.name,
+            "provider": provider,
+            "requestPayload": payload,
+            "message": result.message,
+        }),
+        message: Some(summary),
+        executed_at: Some(executed_at),
+    };
 
-    HttpResponse::NotFound().body("execution not found")
+    let mut state = lock_state(&data);
+    state.execution_results.push(execution.clone());
+    refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
+    HttpResponse::Created().json(execution)
 }
 
 async fn list_executions(
@@ -3206,8 +3267,8 @@ async fn list_executions(
 ) -> impl Responder {
     let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
     let state = lock_state(&data);
-    let executions: Vec<ActionExecution> = state
-        .action_executions
+    let executions: Vec<ExecutionResultRecord> = state
+        .execution_results
         .iter()
         .filter(|execution| execution.tenant_id == tenant_id)
         .filter(|execution| {
@@ -3230,7 +3291,7 @@ async fn get_execution(
     let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
     let state = lock_state(&data);
     let Some(execution) = state
-        .action_executions
+        .execution_results
         .iter()
         .find(|execution| execution.id == *execution_id && execution.tenant_id == tenant_id)
     else {
@@ -3415,14 +3476,14 @@ fn infer_behavioral_patterns(state: &State, tenant_id: &str) -> Vec<BehavioralPa
         }
     }
 
-    let tenant_executions: Vec<&ActionExecution> = state
-        .action_executions
+    let tenant_executions: Vec<&ExecutionResultRecord> = state
+        .execution_results
         .iter()
         .filter(|execution| execution.tenant_id == tenant_id)
         .filter(|execution| execution.executed_at.is_some())
         .collect();
     if !tenant_executions.is_empty() {
-        let external_executions: Vec<&ActionExecution> = tenant_executions
+        let external_executions: Vec<&ExecutionResultRecord> = tenant_executions
             .iter()
             .copied()
             .filter(|execution| !execution.provider.eq_ignore_ascii_case("internal"))
@@ -3607,8 +3668,8 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
         .iter()
         .filter(|selection| selection.tenant_id == tenant_id)
         .collect();
-    let tenant_executions: Vec<&ActionExecution> = state
-        .action_executions
+    let tenant_executions: Vec<&ExecutionResultRecord> = state
+        .execution_results
         .iter()
         .filter(|execution| execution.tenant_id == tenant_id)
         .collect();
@@ -3952,7 +4013,7 @@ fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<Operat
                 "process_nodes".to_string(),
                 "process_edges".to_string(),
                 "action_selections".to_string(),
-                "action_executions".to_string(),
+                "execution_results".to_string(),
             ],
             last_updated_at: now,
         },
@@ -3989,7 +4050,7 @@ fn infer_operational_artifacts(state: &mut State, tenant_id: &str) -> Vec<Operat
             derived_from: vec![
                 "behavioral_patterns".to_string(),
                 "action_selections".to_string(),
-                "action_executions".to_string(),
+                "execution_results".to_string(),
             ],
             last_updated_at: now,
         },
@@ -5125,16 +5186,20 @@ mod tests {
                 }
             }))
             .to_request();
-        let execution: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+        let execution: ExecutionResultRecord = test::call_and_read_body_json(&app, execute_req).await;
         assert_eq!(execution.tenant_id, "acme");
         assert_eq!(execution.provider, "slack");
         assert_eq!(execution.status, "success");
+        assert_eq!(execution.execution_type, "external_signal");
+        assert_eq!(execution.result_type, "external_api_call");
+        assert!(!execution.side_effects.is_empty());
+        assert!(execution.context_snapshot.is_object());
         assert!(execution.executed_at.is_some());
 
         let execution_lookup_req = test::TestRequest::get()
             .uri(&format!("/executions/{}?tenantId=acme", execution.id))
             .to_request();
-        let fetched: ActionExecution =
+        let fetched: ExecutionResultRecord =
             test::call_and_read_body_json(&app, execution_lookup_req).await;
         assert_eq!(fetched.id, execution.id);
     }
@@ -5177,7 +5242,7 @@ mod tests {
                 "provider": "slack"
             }))
             .to_request();
-        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+        let _: ExecutionResultRecord = test::call_and_read_body_json(&app, execute_req).await;
 
         let patterns_req = test::TestRequest::get()
             .uri("/behavioral-patterns?tenantId=default")
@@ -5235,7 +5300,7 @@ mod tests {
                 "provider": "slack"
             }))
             .to_request();
-        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+        let _: ExecutionResultRecord = test::call_and_read_body_json(&app, execute_req).await;
 
         let graph_req = test::TestRequest::get()
             .uri("/process-graph?tenantId=default")
@@ -5311,7 +5376,7 @@ mod tests {
                 "provider": "slack"
             }))
             .to_request();
-        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+        let _: ExecutionResultRecord = test::call_and_read_body_json(&app, execute_req).await;
 
         let artifacts_req = test::TestRequest::get()
             .uri("/operational-artifacts?tenantId=default")
