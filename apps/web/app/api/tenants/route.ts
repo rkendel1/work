@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
+import { runConvexAdminMutation } from "@/lib/convex-admin";
 import { normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 
 function requestHost(request: Request): string {
@@ -47,6 +49,23 @@ function defaultSimulationTenants(host: string) {
   }));
 }
 
+type TenantRecord = {
+  id: string;
+  slug: string;
+  domain: string;
+  name: string;
+  display_name?: string;
+  displayName?: string;
+  vertical?: string;
+  industry?: string;
+  created_at?: number;
+  createdAt?: number;
+};
+
+function simulationFallbackAllowed() {
+  return process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true";
+}
+
 type CreateTenantPayload = {
   name?: unknown;
   slug?: unknown;
@@ -86,27 +105,38 @@ function simulationTenantFromPayload(payload: unknown, host: string) {
 export async function GET(request: Request) {
   const host = requestHost(request);
   const fallbackTenants = defaultSimulationTenants(host);
+  const allowFallback = simulationFallbackAllowed();
   try {
     const response = await fetch(`${RUST_INGRESS_URL}/tenants`, {
       cache: "no-store",
     });
     if (!response.ok) {
-      return NextResponse.json(fallbackTenants, { status: 200 });
+      if (allowFallback) {
+        return NextResponse.json(fallbackTenants, { status: 200 });
+      }
+      return NextResponse.json({ error: "Failed to load tenants" }, { status: response.status });
     }
 
     const tenants = (await response.json()) as unknown;
     if (!Array.isArray(tenants) || tenants.length === 0) {
-      return NextResponse.json(fallbackTenants, { status: 200 });
+      if (allowFallback) {
+        return NextResponse.json(fallbackTenants, { status: 200 });
+      }
+      return NextResponse.json([], { status: 200 });
     }
 
     return NextResponse.json(tenants, { status: 200 });
   } catch {
-    return NextResponse.json(fallbackTenants, { status: 200 });
+    if (allowFallback) {
+      return NextResponse.json(fallbackTenants, { status: 200 });
+    }
+    return NextResponse.json({ error: "Failed to load tenants" }, { status: 502 });
   }
 }
 
 export async function POST(request: Request) {
   const host = requestHost(request);
+  const allowFallback = simulationFallbackAllowed();
   let payload: unknown;
   try {
     payload = await request.json();
@@ -121,16 +151,51 @@ export async function POST(request: Request) {
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok && response.status >= 500) {
-      return NextResponse.json(simulationTenantFromPayload(payload, host), { status: 201 });
+    if (!response.ok && response.status >= 500 && allowFallback) {
+      const tenant = simulationTenantFromPayload(payload, host);
+      return NextResponse.json(tenant, { status: 201 });
     }
 
     const body = await response.text();
-    return new NextResponse(body, {
-      status: response.status,
-      headers: { "Content-Type": "application/json" },
+    if (!response.ok) {
+      return new NextResponse(body, {
+        status: response.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const tenant = JSON.parse(body) as TenantRecord;
+    await runConvexAdminMutation("actions:createTenant", {
+      id: tenant.id,
+      name: tenant.name,
+      slug: tenant.slug,
+      domain: tenant.domain,
+      displayName: tenant.displayName ?? tenant.display_name ?? tenant.name,
+      vertical: tenant.vertical,
+      industry: tenant.industry,
+      createdAt: tenant.createdAt ?? tenant.created_at ?? Math.floor(Date.now() / 1000),
     });
+
+    const { userId } = await auth();
+    if (userId) {
+      const user = await currentUser();
+      const email = user?.primaryEmailAddress?.emailAddress;
+      if (email) {
+        const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
+        await runConvexAdminMutation("actions:upsertUserByEmail", {
+          email,
+          name: fullName || user?.username || undefined,
+          handle: user?.username ?? undefined,
+          tenantId: tenant.id,
+        });
+      }
+    }
+
+    return NextResponse.json(tenant, { status: response.status });
   } catch {
-    return NextResponse.json(simulationTenantFromPayload(payload, host), { status: 201 });
+    if (allowFallback) {
+      return NextResponse.json(simulationTenantFromPayload(payload, host), { status: 201 });
+    }
+    return NextResponse.json({ error: "Failed to create tenant" }, { status: 502 });
   }
 }

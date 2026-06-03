@@ -69,7 +69,9 @@ export function tenantDomainFromSlug(
   }
 
   const rootDomain =
-    normalizedHost && normalizedHost !== SAAS_ROOT_DOMAIN
+    normalizedHost &&
+    normalizedHost !== SAAS_ROOT_DOMAIN &&
+    !normalizedHost.endsWith(`.${SAAS_ROOT_DOMAIN}`)
       ? normalizedHost.startsWith("www.")
         ? normalizedHost.slice(4)
         : normalizedHost
