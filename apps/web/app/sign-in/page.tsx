@@ -5,7 +5,9 @@ import { SignIn } from "@clerk/nextjs";
 export default function SignInPage() {
   const clerkConfigured =
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace-with");
+    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace-with") &&
+    (process.env.NODE_ENV !== "development" ||
+      process.env.NEXT_PUBLIC_ENABLE_CLERK_IN_DEV === "true");
 
   if (!clerkConfigured) {
     return (

@@ -15,7 +15,10 @@ export default function RootLayout({
 }>) {
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const clerkConfigured = Boolean(
-    clerkPublishableKey && !clerkPublishableKey.includes("replace-with"),
+    clerkPublishableKey &&
+      !clerkPublishableKey.includes("replace-with") &&
+      (process.env.NODE_ENV !== "development" ||
+        process.env.NEXT_PUBLIC_ENABLE_CLERK_IN_DEV === "true"),
   );
 
   return (
