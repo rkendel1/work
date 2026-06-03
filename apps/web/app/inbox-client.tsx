@@ -208,6 +208,69 @@ type OperationalArtifact = {
 
 type OperationalKnowledgeTab = "processes" | "sops" | "policies" | "exceptions" | "drift";
 type ContextViewMode = "raw" | "operational";
+type OperationalCardState = "inbox" | "in_progress" | "completed" | "escalated";
+type OperationalSurface = "live_stream" | "queue" | "in_progress" | "resolved";
+
+type OperationalCard = {
+  id: string;
+  signal: {
+    source: string;
+    raw: string;
+    timestamp: number;
+  };
+  meaning: {
+    classification: string;
+    tenantTerm: string;
+    confidence: number;
+  };
+  action: {
+    suggested: string[];
+    allowed: string[];
+    selected?: string;
+  };
+  state: OperationalCardState;
+  inboxItemId: string;
+  workItemId?: string;
+};
+
+function deriveOperationalCardState(
+  work: WorkItem | undefined,
+  executions: ActionExecution[],
+): OperationalCardState {
+  if (!work) {
+    return "inbox";
+  }
+
+  if (["completed", "duplicate", "irrelevant", "closed", "resolved"].includes(work.status)) {
+    return "completed";
+  }
+  if (work.status === "escalated") {
+    return "escalated";
+  }
+  if (["in_progress", "running", "failed", "pending_review"].includes(work.status)) {
+    return "in_progress";
+  }
+  const hasActiveExecution = executions.some((execution) =>
+    ["pending", "running", "partial", "pending_review"].includes(execution.status),
+  );
+  if (hasActiveExecution) {
+    return "in_progress";
+  }
+  return "inbox";
+}
+
+function cardMatchesSurface(card: OperationalCard, surface: OperationalSurface) {
+  if (surface === "live_stream") {
+    return true;
+  }
+  if (surface === "queue") {
+    return card.state === "inbox" || card.state === "escalated";
+  }
+  if (surface === "in_progress") {
+    return card.state === "in_progress";
+  }
+  return card.state === "completed";
+}
 
 function contextFallback() {
   return {
@@ -361,6 +424,8 @@ export function InboxClient({
   const [operationalArtifacts, setOperationalArtifacts] = useState<OperationalArtifact[]>([]);
   const [knowledgeTab, setKnowledgeTab] = useState<OperationalKnowledgeTab>("processes");
   const [artifactQuery, setArtifactQuery] = useState("");
+  const [operationalSurface, setOperationalSurface] = useState<OperationalSurface>("live_stream");
+  const [cardMessages, setCardMessages] = useState<Record<string, string>>({});
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
@@ -605,24 +670,42 @@ export function InboxClient({
     await refresh();
   }
 
-  async function onRecordOutcome(event: FormEvent<HTMLFormElement>, workId: string) {
-    event.preventDefault();
-    setError(null);
-    setWorkMessages((current) => ({ ...current, [workId]: "" }));
-
+  async function updateWorkOutcome(
+    workId: string,
+    status: string,
+    feedback: string,
+    resolutionNotes?: string,
+  ) {
     const response = await fetch(`/api/work/${encodeURIComponent(workId)}/outcome`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         selectedActionId: selectedActionByWork[workId],
-        status: outcomeStatusByWork[workId] ?? "completed",
-        feedback: outcomeFeedbackByWork[workId] ?? "correct",
-        resolutionNotes: outcomeNotesByWork[workId],
+        status,
+        feedback,
+        resolutionNotes,
       }),
     });
 
     if (!response.ok) {
       setError(await response.text());
+      return false;
+    }
+    return true;
+  }
+
+  async function onRecordOutcome(event: FormEvent<HTMLFormElement>, workId: string) {
+    event.preventDefault();
+    setError(null);
+    setWorkMessages((current) => ({ ...current, [workId]: "" }));
+
+    const succeeded = await updateWorkOutcome(
+      workId,
+      outcomeStatusByWork[workId] ?? "completed",
+      outcomeFeedbackByWork[workId] ?? "correct",
+      outcomeNotesByWork[workId],
+    );
+    if (!succeeded) {
       return;
     }
 
@@ -630,6 +713,127 @@ export function InboxClient({
     setWorkMessages((current) => ({
       ...current,
       [workId]: "Outcome recorded and learning captured.",
+    }));
+    await refresh();
+  }
+
+  async function onCompleteOperationalCard(card: OperationalCard) {
+    setError(null);
+    setCardMessages((current) => ({ ...current, [card.id]: "" }));
+    if (!card.workItemId) {
+      setCardMessages((current) => ({
+        ...current,
+        [card.id]: "Convert this signal into work before completing it.",
+      }));
+      return;
+    }
+    const succeeded = await updateWorkOutcome(
+      card.workItemId,
+      "completed",
+      "correct",
+      "Completed from operational surface",
+    );
+    if (!succeeded) {
+      return;
+    }
+    setCardMessages((current) => ({
+      ...current,
+      [card.id]: "Marked complete. Operational state and downstream stream updated.",
+    }));
+    await refresh();
+  }
+
+  async function onEscalateOperationalCard(card: OperationalCard) {
+    setError(null);
+    setCardMessages((current) => ({ ...current, [card.id]: "" }));
+    if (!card.workItemId) {
+      setCardMessages((current) => ({
+        ...current,
+        [card.id]: "No work item available yet. Convert this signal into work first.",
+      }));
+      return;
+    }
+    const succeeded = await updateWorkOutcome(
+      card.workItemId,
+      "escalated",
+      "escalated",
+      "Escalated from operational surface",
+    );
+    if (!succeeded) {
+      return;
+    }
+    setCardMessages((current) => ({
+      ...current,
+      [card.id]: "Escalated. Team can continue from queue/in-progress surfaces.",
+    }));
+    await refresh();
+  }
+
+  async function onAssignOperationalCard(card: OperationalCard) {
+    setError(null);
+    setCardMessages((current) => ({ ...current, [card.id]: "" }));
+    if (!card.workItemId) {
+      setCardMessages((current) => ({
+        ...current,
+        [card.id]: "No work item available yet. Convert this signal into work first.",
+      }));
+      return;
+    }
+    const work = workItems.find((item) => item.id === card.workItemId);
+    if (!work) {
+      setCardMessages((current) => ({ ...current, [card.id]: "Work item not found." }));
+      return;
+    }
+    const assignedTeam = orgUnitById(work.assigned_org_unit_id)?.name ?? "Operations";
+    const response = await fetch("/api/actions/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        workItemId: work.id,
+        actionName: `Assign to ${assignedTeam}`,
+        payload: {
+          message: `Assigned operational card to ${assignedTeam}`,
+        },
+      }),
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    setCardMessages((current) => ({
+      ...current,
+      [card.id]: `Delegated to ${assignedTeam}. Execution adapter recorded.`,
+    }));
+    await refresh();
+  }
+
+  async function onConvertOperationalCard(card: OperationalCard) {
+    setError(null);
+    setCardMessages((current) => ({ ...current, [card.id]: "" }));
+    if (card.workItemId) {
+      setCardMessages((current) => ({
+        ...current,
+        [card.id]: "Already converted to a work item.",
+      }));
+      return;
+    }
+    const response = await fetch("/api/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: card.signal.source,
+        content: card.signal.raw,
+        tenantId,
+      }),
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    setCardMessages((current) => ({
+      ...current,
+      [card.id]: "Converted to work. Card will appear with work state after refresh.",
     }));
     await refresh();
   }
@@ -832,6 +1036,43 @@ export function InboxClient({
       evidence: work.operational_meaning.evidence,
     };
   };
+  const workByInboxId = new Map(workItems.map((work) => [work.inbox_item_id, work]));
+  const operationalCards: OperationalCard[] = inboxItems
+    .map((item) => {
+      const linkedWork = workByInboxId.get(item.id);
+      const context = linkedWork ? operationalMeaningForWork(linkedWork) : contextFallback();
+      const suggestedActions = (linkedWork?.recommended_actions ?? []).map((action) => action.title);
+      return {
+        id: item.id,
+        signal: {
+          source: item.source,
+          raw: item.content,
+          timestamp: Number.isNaN(Date.parse(item.received_at))
+            ? Number.isNaN(Date.parse(item.status_updated_at))
+              ? 0
+              : Date.parse(item.status_updated_at)
+            : Date.parse(item.received_at),
+        },
+        meaning: {
+          classification: linkedWork?.classification_type ?? "unclassified_signal",
+          tenantTerm: context.inferredMeaning,
+          confidence: context.confidence,
+        },
+        action: {
+          suggested: suggestedActions,
+          allowed: ["mark_complete", "assign", "escalate", "convert_to_work"],
+          selected: linkedWork ? selectedActionByWork[linkedWork.id] : undefined,
+        },
+        state: deriveOperationalCardState(linkedWork, linkedWork ? (executionsByWork[linkedWork.id] ?? []) : []),
+        inboxItemId: item.id,
+        workItemId: linkedWork?.id,
+      };
+    })
+    .sort((a, b) => b.signal.timestamp - a.signal.timestamp);
+  const visibleOperationalCards = operationalCards.filter((card) =>
+    cardMatchesSurface(card, operationalSurface),
+  );
+
   const artifactTypeByKnowledgeTab: Record<OperationalKnowledgeTab, OperationalArtifact["type"]> = {
     processes: "process_map",
     sops: "SOP",
@@ -980,6 +1221,134 @@ export function InboxClient({
                   Scenario Injection
                 </a>
               </div>
+            </div>
+          </section>
+
+          <section className="space-y-4 rounded-lg border dark:border-zinc-700 dark:bg-zinc-800 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-semibold dark:text-zinc-100">Operational Surfaces</h2>
+              <div className="ml-auto flex flex-wrap gap-2">
+                {(
+                  [
+                    ["live_stream", "Live Stream"],
+                    ["queue", "Queue"],
+                    ["in_progress", "In Progress"],
+                    ["resolved", "Resolved"],
+                  ] as Array<[OperationalSurface, string]>
+                ).map(([surface, label]) => (
+                  <button
+                    key={surface}
+                    type="button"
+                    onClick={() => setOperationalSurface(surface)}
+                    className={`rounded border dark:border-zinc-700 px-2 py-1 text-xs ${
+                      operationalSurface === surface
+                        ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900"
+                        : "bg-white dark:bg-zinc-700 dark:text-zinc-200"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {visibleOperationalCards.map((card) => {
+                const work = card.workItemId
+                  ? workItems.find((workItem) => workItem.id === card.workItemId)
+                  : undefined;
+                const executions = card.workItemId ? (executionsByWork[card.workItemId] ?? []) : [];
+                const latestExecution = executions.reduce<ActionExecution | null>(
+                  (latest, execution) =>
+                    !latest || execution.timestamp > latest.timestamp ? execution : latest,
+                  null,
+                );
+                return (
+                  <article
+                    key={card.id}
+                    className="rounded border dark:border-zinc-700 bg-white dark:bg-zinc-700 p-3 text-sm"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium dark:text-zinc-100">OperationalCard</p>
+                      <IngressStatusBadge status={card.state} />
+                    </div>
+                    <div className="mt-2 space-y-1 text-zinc-700 dark:text-zinc-200">
+                      <p>
+                        <span className="font-medium">Signal:</span> {card.signal.raw}
+                      </p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-300">
+                        source: {card.signal.source} • {new Date(card.signal.timestamp).toLocaleString()}
+                      </p>
+                      <p>
+                        <span className="font-medium">Meaning:</span> {card.meaning.tenantTerm}
+                      </p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-300">
+                        classification: {card.meaning.classification} • confidence:{" "}
+                        {(card.meaning.confidence * 100).toFixed(0)}%
+                      </p>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void onCompleteOperationalCard(card)}
+                        className="rounded bg-zinc-900 dark:bg-zinc-100 px-2 py-1 text-xs text-white dark:text-zinc-900"
+                      >
+                        Mark Complete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onAssignOperationalCard(card)}
+                        className="rounded border dark:border-zinc-500 dark:bg-zinc-600 px-2 py-1 text-xs"
+                      >
+                        Assign
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onEscalateOperationalCard(card)}
+                        className="rounded border border-amber-500 text-amber-700 dark:text-amber-200 px-2 py-1 text-xs"
+                      >
+                        Escalate
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void onConvertOperationalCard(card)}
+                        className="rounded border dark:border-zinc-500 dark:bg-zinc-600 px-2 py-1 text-xs"
+                      >
+                        Convert to Work
+                      </button>
+                    </div>
+                    {(card.action.suggested.length > 0 || card.action.selected) ? (
+                      <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-300">
+                        Suggested: {card.action.suggested.join(", ") || "None"}{" "}
+                        {card.action.selected ? `• Selected: ${card.action.selected}` : ""}
+                      </p>
+                    ) : null}
+                    <div className="mt-2 rounded border dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-600 p-2 text-xs">
+                      <p>
+                        <span className="font-medium">Completion State:</span> {card.state}
+                        {work ? ` • work: ${work.status}` : " • work not created yet"}
+                      </p>
+                      <p>
+                        <span className="font-medium">Downstream Effects:</span>{" "}
+                        {latestExecution
+                          ? `${latestExecution.provider.toUpperCase()} ${latestExecution.status}${
+                              latestExecution.summary ? ` — ${latestExecution.summary}` : ""
+                            }`
+                          : "No execution result yet"}
+                      </p>
+                    </div>
+                    {cardMessages[card.id] ? (
+                      <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-300">
+                        {cardMessages[card.id]}
+                      </p>
+                    ) : null}
+                  </article>
+                );
+              })}
+              {visibleOperationalCards.length === 0 ? (
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  No operational cards on this surface.
+                </p>
+              ) : null}
             </div>
           </section>
 
