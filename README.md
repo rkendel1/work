@@ -80,6 +80,11 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `org_units`
 - `business_rules`
 - `users`
+- `roles`
+- `assignments`
+- `messages`
+- `notifications`
+- `work_states`
 - `tenants`
 
 ## Local Development

@@ -594,3 +594,74 @@ export const listActionMappings = queryGeneric({
       .collect();
   },
 });
+
+export const createRole = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    name: v.string(),
+    permissions: v.array(v.string()),
+    scopes: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("roles")
+      .withIndex("by_tenant_name", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) => query.eq(query.field("name"), args.name))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        permissions: args.permissions,
+        scopes: args.scopes,
+      });
+      return existing._id;
+    }
+    return await ctx.db.insert("roles", args);
+  },
+});
+
+export const listRoles = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("roles")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .collect();
+  },
+});
+
+export const upsertUserAccountability = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    email: v.string(),
+    name: v.optional(v.string()),
+    handle: v.string(),
+    role: v.string(),
+    orgUnitId: v.optional(v.id("org_units")),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", (query) => query.eq("email", args.email))
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        tenantId: args.tenantId,
+        name: args.name,
+        handle: args.handle,
+        role: args.role,
+        orgUnitId: args.orgUnitId,
+      });
+      return existing._id;
+    }
+    return await ctx.db.insert("users", {
+      tenantId: args.tenantId,
+      email: args.email,
+      name: args.name,
+      handle: args.handle,
+      role: args.role,
+      orgUnitId: args.orgUnitId,
+    });
+  },
+});

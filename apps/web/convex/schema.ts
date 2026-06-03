@@ -59,9 +59,23 @@ export default defineSchema({
     .index("by_tenant_external_id", ["tenantId", "externalId"])
     .index("by_tenant_inbox_external_id", ["tenantId", "inboxExternalId"]),
   users: defineTable({
+    tenantId: v.optional(v.string()),
+    handle: v.optional(v.string()),
+    role: v.optional(v.string()),
+    orgUnitId: v.optional(v.id("org_units")),
     email: v.string(),
     name: v.optional(v.string()),
-  }).index("by_email", ["email"]),
+  })
+    .index("by_email", ["email"])
+    .index("by_tenant_handle", ["tenantId", "handle"]),
+  roles: defineTable({
+    tenantId: v.string(),
+    name: v.string(),
+    permissions: v.array(v.string()),
+    scopes: v.array(v.string()),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_name", ["tenantId", "name"]),
   tenants: defineTable({
     id: v.string(),
     slug: v.string(),
@@ -173,6 +187,48 @@ export default defineSchema({
   })
     .index("by_work_item", ["workItemId"])
     .index("by_tenant", ["tenantId"]),
+  assignments: defineTable({
+    tenantId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    userId: v.id("users"),
+    responsibilityType: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_tenant_entity", ["tenantId", "entityType", "entityId"])
+    .index("by_tenant_user", ["tenantId", "userId"]),
+  messages: defineTable({
+    tenantId: v.string(),
+    authorUserId: v.id("users"),
+    targetType: v.string(),
+    targetId: v.string(),
+    type: v.string(),
+    content: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_tenant_target_created_at", ["tenantId", "targetType", "targetId", "createdAt"])
+    .index("by_tenant_author_created_at", ["tenantId", "authorUserId", "createdAt"]),
+  notifications: defineTable({
+    tenantId: v.string(),
+    userId: v.id("users"),
+    triggerType: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    read: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index("by_tenant_user_created_at", ["tenantId", "userId", "createdAt"])
+    .index("by_tenant_user_read", ["tenantId", "userId", "read"]),
+  work_states: defineTable({
+    tenantId: v.string(),
+    workItemId: v.id("work_items"),
+    state: v.string(),
+    transitionedBy: v.string(),
+    reason: v.optional(v.string()),
+    timestamp: v.number(),
+  })
+    .index("by_work_item_timestamp", ["workItemId", "timestamp"])
+    .index("by_tenant_timestamp", ["tenantId", "timestamp"]),
   tenant_secrets: defineTable({
     tenantId: v.string(),
     keyName: v.string(),

@@ -366,6 +366,312 @@ export const recordWorkOutcome = mutationGeneric({
   },
 });
 
+export const createAssignment = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    userId: v.id("users"),
+    responsibilityType: v.string(),
+    createdAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const createdAt = args.createdAt ?? Date.now();
+    const assignmentId = await ctx.db.insert("assignments", {
+      tenantId: args.tenantId,
+      entityType: args.entityType,
+      entityId: args.entityId,
+      userId: args.userId,
+      responsibilityType: args.responsibilityType,
+      createdAt,
+    });
+
+    await ctx.db.insert("notifications", {
+      tenantId: args.tenantId,
+      userId: args.userId,
+      triggerType: "assignment_created",
+      entityType: args.entityType,
+      entityId: args.entityId,
+      read: false,
+      createdAt,
+    });
+
+    return assignmentId;
+  },
+});
+
+export const addMessage = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    authorUserId: v.id("users"),
+    targetType: v.string(),
+    targetId: v.string(),
+    type: v.string(),
+    content: v.string(),
+    createdAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const createdAt = args.createdAt ?? Date.now();
+    const messageId = await ctx.db.insert("messages", {
+      tenantId: args.tenantId,
+      authorUserId: args.authorUserId,
+      targetType: args.targetType,
+      targetId: args.targetId,
+      type: args.type,
+      content: args.content,
+      createdAt,
+    });
+
+    const assignments = await ctx.db
+      .query("assignments")
+      .withIndex("by_tenant_entity", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("entityType"), args.targetType),
+          query.eq(query.field("entityId"), args.targetId),
+        ),
+      )
+      .collect();
+
+    for (const assignment of assignments) {
+      if (assignment.userId === args.authorUserId) {
+        continue;
+      }
+      await ctx.db.insert("notifications", {
+        tenantId: args.tenantId,
+        userId: assignment.userId,
+        triggerType: "message_added",
+        entityType: args.targetType,
+        entityId: args.targetId,
+        read: false,
+        createdAt,
+      });
+    }
+
+    if (args.type === "approval" && args.targetType === "work_item") {
+      const workItem = (
+        await ctx.db
+          .query("work_items")
+          .withIndex("by_tenant_external_id", (query) =>
+            query.eq("tenantId", args.tenantId),
+          )
+          .collect()
+      ).find((item) => item.externalId === args.targetId);
+
+      if (workItem) {
+        await ctx.db.patch(workItem._id, { status: "resolved" });
+        await ctx.db.insert("work_states", {
+          tenantId: args.tenantId,
+          workItemId: workItem._id,
+          state: "resolved",
+          transitionedBy: "rule_engine",
+          reason: `approval message ${messageId}`,
+          timestamp: createdAt,
+        });
+
+        for (const assignment of assignments) {
+          if (assignment.userId === args.authorUserId) {
+            continue;
+          }
+          await ctx.db.insert("notifications", {
+            tenantId: args.tenantId,
+            userId: assignment.userId,
+            triggerType: "status_changed",
+            entityType: "work_item",
+            entityId: args.targetId,
+            read: false,
+            createdAt,
+          });
+        }
+      }
+    }
+
+    if (args.type === "escalation") {
+      const tenantUsers = await ctx.db
+        .query("users")
+        .withIndex("by_tenant_handle", (query) => query.eq("tenantId", args.tenantId))
+        .collect();
+      for (const user of tenantUsers) {
+        if (user.role !== "org_lead") {
+          continue;
+        }
+        await ctx.db.insert("notifications", {
+          tenantId: args.tenantId,
+          userId: user._id,
+          triggerType: "escalation_triggered",
+          entityType: args.targetType,
+          entityId: args.targetId,
+          read: false,
+          createdAt,
+        });
+      }
+    }
+
+    return messageId;
+  },
+});
+
+export const transitionWorkState = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    workItemExternalId: v.string(),
+    state: v.string(),
+    transitionedBy: v.string(),
+    reason: v.optional(v.string()),
+    timestamp: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const workItem = (
+      await ctx.db
+        .query("work_items")
+        .withIndex("by_tenant_external_id", (query) => query.eq("tenantId", args.tenantId))
+        .collect()
+    ).find((item) => item.externalId === args.workItemExternalId);
+    if (!workItem) {
+      throw new Error("work item not found");
+    }
+
+    const timestamp = args.timestamp ?? Date.now();
+    await ctx.db.patch(workItem._id, { status: args.state });
+    const workStateId = await ctx.db.insert("work_states", {
+      tenantId: args.tenantId,
+      workItemId: workItem._id,
+      state: args.state,
+      transitionedBy: args.transitionedBy,
+      reason: args.reason,
+      timestamp,
+    });
+
+    if (args.state === "blocked") {
+      const tenantUsers = await ctx.db
+        .query("users")
+        .withIndex("by_tenant_handle", (query) => query.eq("tenantId", args.tenantId))
+        .collect();
+      for (const user of tenantUsers) {
+        if (user.role !== "org_lead") {
+          continue;
+        }
+        await ctx.db.insert("notifications", {
+          tenantId: args.tenantId,
+          userId: user._id,
+          triggerType: "status_changed",
+          entityType: "work_item",
+          entityId: args.workItemExternalId,
+          read: false,
+          createdAt: timestamp,
+        });
+      }
+    }
+
+    return workStateId;
+  },
+});
+
+export const markNotificationRead = mutationGeneric({
+  args: {
+    notificationId: v.id("notifications"),
+    read: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const read = args.read ?? true;
+    await ctx.db.patch(args.notificationId, { read });
+    return args.notificationId;
+  },
+});
+
+export const listAssignmentsForEntity = queryGeneric({
+  args: {
+    tenantId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("assignments")
+      .withIndex("by_tenant_entity", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("entityType"), args.entityType),
+          query.eq(query.field("entityId"), args.entityId),
+        ),
+      )
+      .collect();
+  },
+});
+
+export const listMessagesForTarget = queryGeneric({
+  args: {
+    tenantId: v.string(),
+    targetType: v.string(),
+    targetId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("messages")
+      .withIndex("by_tenant_target_created_at", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("targetType"), args.targetType),
+          query.eq(query.field("targetId"), args.targetId),
+        ),
+      )
+      .order("asc")
+      .collect();
+  },
+});
+
+export const listNotificationsForUser = queryGeneric({
+  args: {
+    tenantId: v.string(),
+    userId: v.id("users"),
+    unreadOnly: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const notifications = await ctx.db
+      .query("notifications")
+      .withIndex("by_tenant_user_created_at", (query) =>
+        query.eq("tenantId", args.tenantId),
+      )
+      .filter((query) => query.eq(query.field("userId"), args.userId))
+      .order("desc")
+      .collect();
+
+    if (!args.unreadOnly) {
+      return notifications;
+    }
+    return notifications.filter((notification) => !notification.read);
+  },
+});
+
+export const listWorkStates = queryGeneric({
+  args: {
+    tenantId: v.string(),
+    workItemExternalId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const workItem = (
+      await ctx.db
+        .query("work_items")
+        .withIndex("by_tenant_external_id", (query) => query.eq("tenantId", args.tenantId))
+        .collect()
+    ).find((item) => item.externalId === args.workItemExternalId);
+    if (!workItem) {
+      return [];
+    }
+    return await ctx.db
+      .query("work_states")
+      .withIndex("by_work_item_timestamp", (query) => query.eq("workItemId", workItem._id))
+      .order("asc")
+      .collect();
+  },
+});
+
 export const upsertBehavioralPattern = mutationGeneric({
   args: {
     tenantId: v.string(),
