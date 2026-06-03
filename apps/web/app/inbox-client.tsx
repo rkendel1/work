@@ -144,6 +144,11 @@ export function InboxClient({
   const [tenantVertical, setTenantVertical] = useState(SETUP_PACKS[0].vertical);
   const [tenantIndustry, setTenantIndustry] = useState(SETUP_PACKS[0].industries[0]);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
+  const [workMessages, setWorkMessages] = useState<Record<string, string>>({});
+  const [selectedActionByWork, setSelectedActionByWork] = useState<Record<string, string>>({});
+  const [outcomeStatusByWork, setOutcomeStatusByWork] = useState<Record<string, string>>({});
+  const [outcomeFeedbackByWork, setOutcomeFeedbackByWork] = useState<Record<string, string>>({});
+  const [outcomeNotesByWork, setOutcomeNotesByWork] = useState<Record<string, string>>({});
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
@@ -282,6 +287,60 @@ export function InboxClient({
     );
   }
 
+  async function onSelectRecommendedAction(workId: string, actionTitle: string) {
+    setError(null);
+    setWorkMessages((current) => ({ ...current, [workId]: "" }));
+    const response = await fetch(`/api/work/${encodeURIComponent(workId)}/selection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemAction: actionTitle,
+        tenantAction: actionTitle,
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setSelectedActionByWork((current) => ({ ...current, [workId]: actionTitle }));
+    setWorkMessages((current) => ({
+      ...current,
+      [workId]: `Selected action: ${actionTitle}`,
+    }));
+    await refresh();
+  }
+
+  async function onRecordOutcome(event: FormEvent<HTMLFormElement>, workId: string) {
+    event.preventDefault();
+    setError(null);
+    setWorkMessages((current) => ({ ...current, [workId]: "" }));
+
+    const response = await fetch(`/api/work/${encodeURIComponent(workId)}/outcome`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedActionId: selectedActionByWork[workId],
+        status: outcomeStatusByWork[workId] ?? "completed",
+        feedback: outcomeFeedbackByWork[workId] ?? "correct",
+        resolutionNotes: outcomeNotesByWork[workId],
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setOutcomeNotesByWork((current) => ({ ...current, [workId]: "" }));
+    setWorkMessages((current) => ({
+      ...current,
+      [workId]: "Outcome recorded and learning captured.",
+    }));
+    await refresh();
+  }
+
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
 
@@ -408,11 +467,87 @@ export function InboxClient({
           <div className="space-y-2">
             {workItems.map((work) => (
               <div key={work.id} className="rounded border p-3 text-sm">
-                <p className="font-medium">{work.title}</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-medium">{work.title}</p>
+                  <IngressStatusBadge status={work.status} />
+                </div>
                 <p className="text-zinc-700">{work.summary}</p>
                 <p className="mt-1 text-xs text-zinc-500">
                   Classification: {work.classification_type}
                 </p>
+                <div className="mt-3 rounded border bg-zinc-50 p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Suggested Actions
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(work.recommended_actions ?? []).map((action, index) => (
+                      <button
+                        key={`${work.id}-recommended-${index}`}
+                        type="button"
+                        onClick={() => void onSelectRecommendedAction(work.id, action.title)}
+                        className="rounded border bg-white px-2 py-1 text-xs hover:bg-zinc-100"
+                      >
+                        {action.title}
+                      </button>
+                    ))}
+                  </div>
+                  <form
+                    onSubmit={(event) => void onRecordOutcome(event, work.id)}
+                    className="mt-3 grid gap-2 md:grid-cols-4"
+                  >
+                    <select
+                      value={outcomeStatusByWork[work.id] ?? "completed"}
+                      onChange={(event) =>
+                        setOutcomeStatusByWork((current) => ({
+                          ...current,
+                          [work.id]: event.target.value,
+                        }))
+                      }
+                      className="rounded border px-2 py-1 text-xs"
+                    >
+                      <option value="completed">Completed</option>
+                      <option value="failed">Failed</option>
+                      <option value="escalated">Escalated</option>
+                      <option value="duplicate">Duplicate</option>
+                      <option value="irrelevant">Irrelevant</option>
+                    </select>
+                    <select
+                      value={outcomeFeedbackByWork[work.id] ?? "correct"}
+                      onChange={(event) =>
+                        setOutcomeFeedbackByWork((current) => ({
+                          ...current,
+                          [work.id]: event.target.value,
+                        }))
+                      }
+                      className="rounded border px-2 py-1 text-xs"
+                    >
+                      <option value="correct">✅ Correct action</option>
+                      <option value="wrong">❌ Wrong action</option>
+                      <option value="partial">⚠️ Partially correct</option>
+                      <option value="escalated">➜ Needed escalation</option>
+                    </select>
+                    <input
+                      value={outcomeNotesByWork[work.id] ?? ""}
+                      onChange={(event) =>
+                        setOutcomeNotesByWork((current) => ({
+                          ...current,
+                          [work.id]: event.target.value,
+                        }))
+                      }
+                      className="rounded border px-2 py-1 text-xs md:col-span-2"
+                      placeholder="Resolution notes (optional)"
+                    />
+                    <button
+                      type="submit"
+                      className="rounded bg-black px-3 py-1 text-xs text-white md:col-span-4"
+                    >
+                      Record Outcome
+                    </button>
+                  </form>
+                  {workMessages[work.id] ? (
+                    <p className="mt-2 text-xs text-emerald-700">{workMessages[work.id]}</p>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>

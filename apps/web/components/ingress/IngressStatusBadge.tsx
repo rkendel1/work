@@ -7,6 +7,13 @@ const LABELS: Record<string, string> = {
   classified: "Classified",
   work_generated: "Work Generated",
   closed: "Closed",
+  open: "Open",
+  in_progress: "In Progress",
+  completed: "Completed",
+  failed: "Failed",
+  escalated: "Escalated",
+  duplicate: "Duplicate",
+  irrelevant: "Irrelevant",
 };
 
 export function IngressStatusBadge({ status }: Props) {
