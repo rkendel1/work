@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { clerkMiddleware } from "@clerk/nextjs/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
 import { isRootHost, tenantSlugFromHost } from "@/lib/tenant-routing";
 
@@ -10,7 +11,7 @@ type TenantRecord = {
 const DEFAULT_TENANT_SLUG = "default";
 const DEFAULT_TENANT_ID = "default";
 
-export async function middleware(request: NextRequest) {
+async function tenantRoutingMiddleware(request: NextRequest) {
   const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
   const tenantSlug =
     tenantSlugFromHost(host) ?? (isRootHost(host) ? DEFAULT_TENANT_SLUG : null);
@@ -54,6 +55,10 @@ export async function middleware(request: NextRequest) {
   response.headers.set("x-tenant-slug", tenantSlug);
   return response;
 }
+
+export default clerkMiddleware(async (_auth, request) => {
+  return tenantRoutingMiddleware(request);
+});
 
 export const config = {
   matcher: [
