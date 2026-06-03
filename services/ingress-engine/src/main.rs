@@ -125,6 +125,44 @@ struct BehavioralPattern {
     last_observed_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessNode {
+    id: Uuid,
+    tenant_id: String,
+    org_unit_id: Option<Uuid>,
+    name: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    source: String,
+    confidence: f64,
+    first_seen_at: i64,
+    last_seen_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessEdge {
+    id: Uuid,
+    tenant_id: String,
+    from_node_id: Uuid,
+    to_node_id: Uuid,
+    transition_type: String,
+    frequency: f64,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessGraph {
+    tenant_id: String,
+    process_name: String,
+    process_nodes: Vec<ProcessNode>,
+    process_edges: Vec<ProcessEdge>,
+    designed_process: Vec<String>,
+    drift_score: f64,
+    bottlenecks: Vec<String>,
+    bypass_paths: Vec<String>,
+    external_execution_points: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IngestRequest {
@@ -470,6 +508,8 @@ struct State {
     work_outcomes: Vec<WorkOutcome>,
     action_executions: Vec<ActionExecution>,
     behavioral_patterns: Vec<BehavioralPattern>,
+    process_nodes: Vec<ProcessNode>,
+    process_edges: Vec<ProcessEdge>,
     tenant_secrets: Vec<TenantSecret>,
 }
 
@@ -505,6 +545,8 @@ impl Default for State {
             work_outcomes: Vec::new(),
             action_executions: Vec::new(),
             behavioral_patterns: Vec::new(),
+            process_nodes: Vec::new(),
+            process_edges: Vec::new(),
             tenant_secrets: Vec::new(),
         }
     }
@@ -3336,6 +3378,320 @@ async fn list_behavioral_patterns(
     HttpResponse::Ok().json(patterns)
 }
 
+fn format_process_name(classification_type: &str) -> String {
+    let mut words = classification_type
+        .split('_')
+        .filter(|segment| !segment.trim().is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + chars.as_str().to_lowercase().as_str()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<String>>();
+    if words.is_empty() {
+        words.push("Operational".to_string());
+    }
+    format!("{} Handling", words.join(" "))
+}
+
+fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
+    let now = Utc::now().timestamp();
+    let tenant_work_items: Vec<&WorkItem> = state
+        .work_items
+        .iter()
+        .filter(|work_item| work_item.tenant_id == tenant_id)
+        .collect();
+    let tenant_selections: Vec<&ActionSelection> = state
+        .action_selections
+        .iter()
+        .filter(|selection| selection.tenant_id == tenant_id)
+        .collect();
+    let tenant_executions: Vec<&ActionExecution> = state
+        .action_executions
+        .iter()
+        .filter(|execution| execution.tenant_id == tenant_id)
+        .collect();
+    let tenant_outcomes: Vec<&WorkOutcome> = state
+        .work_outcomes
+        .iter()
+        .filter(|outcome| outcome.tenant_id == tenant_id)
+        .collect();
+
+    let process_name = tenant_work_items
+        .first()
+        .map(|work_item| format_process_name(&work_item.classification_type))
+        .unwrap_or_else(|| "Operational Request Handling".to_string());
+    let total_work = tenant_work_items.len() as f64;
+    let denominator = if total_work > 0.0 { total_work } else { 1.0 };
+
+    let drifted_selection_count = tenant_selections
+        .iter()
+        .filter(|selection| {
+            !selection
+                .system_action
+                .eq_ignore_ascii_case(selection.tenant_action.as_str())
+        })
+        .count() as f64;
+    let external_execution_count = tenant_executions
+        .iter()
+        .filter(|execution| !execution.provider.eq_ignore_ascii_case("internal"))
+        .count() as f64;
+    let escalated_work_count = tenant_work_items
+        .iter()
+        .filter(|work_item| work_item.escalation_target.is_some() || work_item.require_approval)
+        .count() as f64;
+    let unresolved_count = tenant_work_items
+        .iter()
+        .filter(|work_item| {
+            !matches!(
+                work_item.status.as_str(),
+                "completed" | "failed" | "duplicate" | "irrelevant"
+            )
+        })
+        .count() as f64;
+    let completed_count = tenant_outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.status.as_str(),
+                "completed" | "failed" | "duplicate" | "irrelevant"
+            )
+        })
+        .count() as f64;
+    let completion_count = completed_count.max(total_work - unresolved_count);
+
+    let org_unit_by_id: HashMap<Uuid, &OrgUnit> = state
+        .org_units
+        .iter()
+        .filter(|org_unit| org_unit.tenant_id == tenant_id)
+        .map(|org_unit| (org_unit.id, org_unit))
+        .collect();
+
+    let mut node_ids_by_name: HashMap<String, Uuid> = HashMap::new();
+    let mut process_nodes: Vec<ProcessNode> = Vec::new();
+    let mut ensure_node = |name: &str,
+                           node_type: &str,
+                           source: &str,
+                           confidence: f64,
+                           org_unit_id: Option<Uuid>| {
+        if let Some(existing_id) = node_ids_by_name.get(name) {
+            if let Some(existing_node) = process_nodes.iter_mut().find(|node| node.id == *existing_id) {
+                existing_node.confidence = existing_node.confidence.max(confidence);
+                existing_node.first_seen_at = existing_node.first_seen_at.min(now);
+                existing_node.last_seen_at = existing_node.last_seen_at.max(now);
+                existing_node.source = source.to_string();
+                existing_node.org_unit_id = org_unit_id;
+            }
+            *existing_id
+        } else {
+            let id = Uuid::new_v4();
+            process_nodes.push(ProcessNode {
+                id,
+                tenant_id: tenant_id.to_string(),
+                org_unit_id,
+                name: name.to_string(),
+                node_type: node_type.to_string(),
+                source: source.to_string(),
+                confidence: confidence.clamp(0.0, 1.0),
+                first_seen_at: now,
+                last_seen_at: now,
+            });
+            node_ids_by_name.insert(name.to_string(), id);
+            id
+        }
+    };
+
+    let process_id = ensure_node(&process_name, "process", "inferred", 1.0, None);
+    let intake_id = ensure_node("Intake", "step", "inferred", 1.0, None);
+    let maintenance_review_org_unit = tenant_work_items.first().map(|work_item| work_item.assigned_org_unit_id);
+    let maintenance_review_id = ensure_node(
+        "Maintenance Review",
+        "step",
+        "inferred",
+        (total_work / denominator).clamp(0.0, 1.0),
+        maintenance_review_org_unit,
+    );
+    let completion_id = ensure_node(
+        "Completion",
+        "step",
+        "inferred",
+        (completion_count / denominator).clamp(0.0, 1.0),
+        None,
+    );
+
+    let mut process_edges: Vec<ProcessEdge> = Vec::new();
+    let mut add_edge = |from_node_id: Uuid, to_node_id: Uuid, transition_type: &str, frequency: f64| {
+        if frequency <= 0.0 {
+            return;
+        }
+        if let Some(existing_edge) = process_edges.iter_mut().find(|edge| {
+            edge.from_node_id == from_node_id
+                && edge.to_node_id == to_node_id
+                && edge.transition_type == transition_type
+        }) {
+            existing_edge.frequency += frequency;
+            existing_edge.confidence = (existing_edge.frequency / denominator).clamp(0.0, 1.0);
+            return;
+        }
+        process_edges.push(ProcessEdge {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            from_node_id,
+            to_node_id,
+            transition_type: transition_type.to_string(),
+            frequency,
+            confidence: (frequency / denominator).clamp(0.0, 1.0),
+        });
+    };
+
+    add_edge(process_id, intake_id, "normal_flow", denominator);
+    add_edge(intake_id, maintenance_review_id, "normal_flow", denominator);
+
+    let mut bypass_paths: Vec<String> = Vec::new();
+    if drifted_selection_count > 0.0 {
+        let override_id = ensure_node(
+            "Operations Override",
+            "exception_path",
+            "inferred",
+            (drifted_selection_count / denominator).clamp(0.0, 1.0),
+            None,
+        );
+        add_edge(
+            maintenance_review_id,
+            override_id,
+            "bypass",
+            drifted_selection_count,
+        );
+        add_edge(override_id, completion_id, "normal_flow", drifted_selection_count);
+        bypass_paths.push("Maintenance Review → Operations Override".to_string());
+    }
+
+    if escalated_work_count > 0.0 {
+        let escalation_id = ensure_node(
+            "Escalation",
+            "decision",
+            "inferred",
+            (escalated_work_count / denominator).clamp(0.0, 1.0),
+            None,
+        );
+        add_edge(
+            maintenance_review_id,
+            escalation_id,
+            "escalation",
+            escalated_work_count,
+        );
+        add_edge(escalation_id, completion_id, "retry", escalated_work_count);
+        bypass_paths.push("Maintenance Review → Escalation".to_string());
+    }
+
+    let external_execution_points: Vec<String> = tenant_executions
+        .iter()
+        .filter(|execution| !execution.provider.eq_ignore_ascii_case("internal"))
+        .map(|execution| format!("{} ({})", execution.provider, execution.status))
+        .collect();
+    if external_execution_count > 0.0 {
+        let vendor_call_id = ensure_node(
+            "Vendor Call",
+            "exception_path",
+            "inferred",
+            (external_execution_count / denominator).clamp(0.0, 1.0),
+            None,
+        );
+        add_edge(
+            maintenance_review_id,
+            vendor_call_id,
+            "external",
+            external_execution_count,
+        );
+        add_edge(vendor_call_id, completion_id, "normal_flow", external_execution_count);
+        if !bypass_paths.iter().any(|path| path == "Maintenance Review → Vendor Call") {
+            bypass_paths.push("Maintenance Review → Vendor Call".to_string());
+        }
+    }
+
+    let direct_completion_count =
+        (denominator - drifted_selection_count - escalated_work_count - external_execution_count).max(0.0);
+    add_edge(
+        maintenance_review_id,
+        completion_id,
+        "normal_flow",
+        direct_completion_count,
+    );
+
+    let mut unresolved_by_org_unit: HashMap<Uuid, usize> = HashMap::new();
+    for work_item in tenant_work_items.iter().copied().filter(|work_item| {
+        !matches!(
+            work_item.status.as_str(),
+            "completed" | "failed" | "duplicate" | "irrelevant"
+        )
+    }) {
+        *unresolved_by_org_unit
+            .entry(work_item.assigned_org_unit_id)
+            .or_insert(0) += 1;
+    }
+    let bottlenecks = unresolved_by_org_unit
+        .into_iter()
+        .filter_map(|(org_unit_id, count)| {
+            if count as f64 / denominator < 0.4 {
+                return None;
+            }
+            let org_unit_name = org_unit_by_id
+                .get(&org_unit_id)
+                .map(|org_unit| org_unit.name.as_str())
+                .unwrap_or("Unknown");
+            Some(format!(
+                "{org_unit_name} holds {count} unresolved work items"
+            ))
+        })
+        .collect();
+
+    let drift_score = ((drifted_selection_count / denominator)
+        + (external_execution_count / denominator)
+        + (escalated_work_count / denominator)
+        + (unresolved_count / denominator))
+        / 4.0;
+
+    state.process_nodes.retain(|node| node.tenant_id != tenant_id);
+    state
+        .process_nodes
+        .extend(process_nodes.iter().cloned());
+    state.process_edges.retain(|edge| edge.tenant_id != tenant_id);
+    state
+        .process_edges
+        .extend(process_edges.iter().cloned());
+
+    ProcessGraph {
+        tenant_id: tenant_id.to_string(),
+        process_name,
+        process_nodes,
+        process_edges,
+        designed_process: vec![
+            "Intake".to_string(),
+            "Assign Maintenance".to_string(),
+            "Resolve".to_string(),
+            "Close".to_string(),
+        ],
+        drift_score: drift_score.clamp(0.0, 1.0),
+        bottlenecks,
+        bypass_paths,
+        external_execution_points,
+    }
+}
+
+async fn get_process_graph(
+    data: web::Data<AppState>,
+    query: web::Query<TenantScopedQuery>,
+) -> impl Responder {
+    let tenant_id = resolve_tenant_id(query.tenant_id.as_deref());
+    let mut state = lock_state(&data);
+    let graph = infer_process_graph(&mut state, &tenant_id);
+    HttpResponse::Ok().json(graph)
+}
+
 async fn list_items(
     data: web::Data<AppState>,
     query: web::Query<TenantScopedQuery>,
@@ -3688,6 +4044,7 @@ fn app_config(cfg: &mut web::ServiceConfig) {
         .route("/items/{id}/timeline", web::get().to(item_timeline))
         .route("/work", web::get().to(list_work))
         .route("/behavioral-patterns", web::get().to(list_behavioral_patterns))
+        .route("/process-graph", web::get().to(get_process_graph))
         .route("/work/routing-preview", web::get().to(work_routing_preview))
         .route("/work/{id}/selection", web::post().to(select_work_action))
         .route("/work/{id}/outcome", web::post().to(record_work_outcome))
@@ -4436,6 +4793,82 @@ mod tests {
                 .iter()
                 .any(|pattern| pattern.pattern_type == "bypass_behavior")
         );
+    }
+
+    #[actix_web::test]
+    async fn process_graph_endpoint_reconstructs_as_is_flow_and_drift() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in Room A"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let select_action_req = test::TestRequest::post()
+            .uri(&format!("/work/{}/selection", work_item.id))
+            .set_json(&serde_json::json!({
+                "systemAction": "Inspect HVAC Unit",
+                "tenantAction": "Dispatch Maintenance Vendor"
+            }))
+            .to_request();
+        let _: ActionSelection = test::call_and_read_body_json(&app, select_action_req).await;
+
+        let execute_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&serde_json::json!({
+                "workItemId": work_item.id,
+                "actionName": "Dispatch Maintenance Vendor",
+                "provider": "slack"
+            }))
+            .to_request();
+        let _: ActionExecution = test::call_and_read_body_json(&app, execute_req).await;
+
+        let graph_req = test::TestRequest::get()
+            .uri("/process-graph?tenantId=default")
+            .to_request();
+        let graph: ProcessGraph = test::call_and_read_body_json(&app, graph_req).await;
+
+        assert_eq!(
+            graph.designed_process,
+            vec![
+                "Intake".to_string(),
+                "Assign Maintenance".to_string(),
+                "Resolve".to_string(),
+                "Close".to_string()
+            ]
+        );
+        assert!(
+            graph.process_nodes.iter().any(|node| node.name == "Intake")
+                && graph
+                    .process_nodes
+                    .iter()
+                    .any(|node| node.name == "Maintenance Review")
+        );
+        assert!(
+            graph
+                .process_edges
+                .iter()
+                .any(|edge| edge.transition_type == "bypass")
+        );
+        assert!(
+            graph
+                .process_edges
+                .iter()
+                .any(|edge| edge.transition_type == "external")
+        );
+        assert!(graph.drift_score > 0.0);
     }
 
 }

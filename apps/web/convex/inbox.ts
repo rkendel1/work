@@ -402,6 +402,78 @@ export const upsertBehavioralPattern = mutationGeneric({
   },
 });
 
+export const upsertProcessNode = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    orgUnitId: v.optional(v.id("org_units")),
+    name: v.string(),
+    type: v.string(),
+    source: v.string(),
+    confidence: v.number(),
+    firstSeenAt: v.number(),
+    lastSeenAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("process_nodes")
+      .withIndex("by_tenant_name", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("name"), args.name),
+          query.eq(query.field("type"), args.type),
+        ),
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        orgUnitId: args.orgUnitId,
+        source: args.source,
+        confidence: Math.max(existing.confidence, args.confidence),
+        firstSeenAt: Math.min(existing.firstSeenAt, args.firstSeenAt),
+        lastSeenAt: Math.max(existing.lastSeenAt, args.lastSeenAt),
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("process_nodes", args);
+  },
+});
+
+export const upsertProcessEdge = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    fromNodeId: v.id("process_nodes"),
+    toNodeId: v.id("process_nodes"),
+    transitionType: v.string(),
+    frequency: v.number(),
+    confidence: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("process_edges")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .filter((query) =>
+        query.and(
+          query.eq(query.field("fromNodeId"), args.fromNodeId),
+          query.eq(query.field("toNodeId"), args.toNodeId),
+          query.eq(query.field("transitionType"), args.transitionType),
+        ),
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        frequency: args.frequency,
+        confidence: args.confidence,
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("process_edges", args);
+  },
+});
+
 export const listInboxItems = queryGeneric({
   args: {
     tenantId: v.string(),
@@ -435,6 +507,30 @@ export const listBehavioralPatterns = queryGeneric({
   handler: async (ctx, args) => {
     return await ctx.db
       .query("behavioral_patterns")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .collect();
+  },
+});
+
+export const listProcessNodes = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("process_nodes")
+      .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+      .collect();
+  },
+});
+
+export const listProcessEdges = queryGeneric({
+  args: {
+    tenantId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("process_edges")
       .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
       .collect();
   },

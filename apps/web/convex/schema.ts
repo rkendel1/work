@@ -194,6 +194,29 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_pattern_type", ["tenantId", "patternType"]),
+  process_nodes: defineTable({
+    tenantId: v.string(),
+    orgUnitId: v.optional(v.id("org_units")),
+    name: v.string(),
+    type: v.string(),
+    source: v.string(),
+    confidence: v.number(),
+    firstSeenAt: v.number(),
+    lastSeenAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_name", ["tenantId", "name"])
+    .index("by_tenant_type", ["tenantId", "type"]),
+  process_edges: defineTable({
+    tenantId: v.string(),
+    fromNodeId: v.id("process_nodes"),
+    toNodeId: v.id("process_nodes"),
+    transitionType: v.string(),
+    frequency: v.number(),
+    confidence: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_from_to", ["tenantId", "fromNodeId", "toNodeId"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),

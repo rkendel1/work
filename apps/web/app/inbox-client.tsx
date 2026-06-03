@@ -134,6 +134,40 @@ type BehavioralPattern = {
   last_observed_at: number;
 };
 
+type ProcessNode = {
+  id: string;
+  tenant_id: string;
+  org_unit_id?: string;
+  name: string;
+  type: string;
+  source: string;
+  confidence: number;
+  first_seen_at: number;
+  last_seen_at: number;
+};
+
+type ProcessEdge = {
+  id: string;
+  tenant_id: string;
+  from_node_id: string;
+  to_node_id: string;
+  transition_type: string;
+  frequency: number;
+  confidence: number;
+};
+
+type ProcessGraph = {
+  tenant_id: string;
+  process_name: string;
+  process_nodes: ProcessNode[];
+  process_edges: ProcessEdge[];
+  designed_process: string[];
+  drift_score: number;
+  bottlenecks: string[];
+  bypass_paths: string[];
+  external_execution_points: string[];
+};
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { cache: "no-store" });
   if (!response.ok) {
@@ -270,6 +304,7 @@ export function InboxClient({
   const [vaultSecretValue, setVaultSecretValue] = useState("");
   const [executionsByWork, setExecutionsByWork] = useState<Record<string, ActionExecution[]>>({});
   const [behavioralPatterns, setBehavioralPatterns] = useState<BehavioralPattern[]>([]);
+  const [processGraph, setProcessGraph] = useState<ProcessGraph | null>(null);
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
@@ -285,6 +320,7 @@ export function InboxClient({
       keyList,
       executionList,
       patternList,
+      graph,
     ] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
@@ -295,6 +331,7 @@ export function InboxClient({
       fetchJson<VaultKey[]>(`/api/vault/keys?${tenantQuery}`),
       fetchJson<ActionExecution[]>(`/api/executions?${tenantQuery}`),
       fetchJson<BehavioralPattern[]>(`/api/behavioral-patterns?${tenantQuery}`),
+      fetchJson<ProcessGraph>(`/api/process-graph?${tenantQuery}`),
     ]);
     setInboxItems(items);
     setWorkItems(work);
@@ -304,6 +341,7 @@ export function InboxClient({
     setBusinessRules(ruleList);
     setVaultKeys(keyList);
     setBehavioralPatterns(patternList);
+    setProcessGraph(graph);
     const groupedExecutions = executionList.reduce<Record<string, ActionExecution[]>>((acc, execution) => {
       if (!acc[execution.work_item_id]) {
         acc[execution.work_item_id] = [];
@@ -1277,10 +1315,48 @@ export function InboxClient({
 
       {tab === "truth" ? (
         <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-lg font-semibold">System Understanding of Your Organization</h2>
+          <h2 className="text-lg font-semibold">How Work Actually Happens</h2>
           <p className="text-sm text-zinc-600">
             Operational Truth Layer (inferred from routing, execution, and outcome behavior).
           </p>
+          {processGraph ? (
+            <div className="rounded border p-3 text-sm">
+              <p className="font-medium">{processGraph.process_name}</p>
+              <p className="text-xs text-zinc-500">
+                Designed: {processGraph.designed_process.join(" → ")}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Drift Score: {processGraph.drift_score.toFixed(2)}
+              </p>
+              <div className="mt-3 space-y-1">
+                {processGraph.process_edges.map((edge) => {
+                  const from = processGraph.process_nodes.find((node) => node.id === edge.from_node_id);
+                  const to = processGraph.process_nodes.find((node) => node.id === edge.to_node_id);
+                  return (
+                    <p key={edge.id} className="text-xs text-zinc-700">
+                      {(from?.name ?? "Unknown")} → {(to?.name ?? "Unknown")} • {edge.transition_type} •{" "}
+                      {edge.frequency.toFixed(0)} occurrences
+                    </p>
+                  );
+                })}
+              </div>
+              {processGraph.bottlenecks.length > 0 ? (
+                <p className="mt-2 text-xs text-amber-700">
+                  Bottlenecks: {processGraph.bottlenecks.join(" • ")}
+                </p>
+              ) : null}
+              {processGraph.bypass_paths.length > 0 ? (
+                <p className="mt-1 text-xs text-zinc-600">
+                  Bypass Paths: {processGraph.bypass_paths.join(" • ")}
+                </p>
+              ) : null}
+              {processGraph.external_execution_points.length > 0 ? (
+                <p className="mt-1 text-xs text-zinc-600">
+                  External Execution: {processGraph.external_execution_points.join(" • ")}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <div className="space-y-2">
             {behavioralPatterns.map((pattern) => (
               <div key={pattern.id} className="rounded border p-3 text-sm">
