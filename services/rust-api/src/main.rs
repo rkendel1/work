@@ -20,6 +20,49 @@ mod recommendation_engine;
 mod config;
 use config::Config;
 
+const SERVICE_NAME: &str = "rust-api";
+const CONTRACT_VERSION: &str = "pr35";
+
+fn runtime_mode(convex_config: &ConvexConfig) -> &'static str {
+    if convex_config.is_connected() {
+        "connected"
+    } else {
+        "standalone"
+    }
+}
+
+fn ok_envelope(data: Value, mode: &'static str) -> Value {
+    serde_json::json!({
+        "ok": true,
+        "service": SERVICE_NAME,
+        "trace_id": null,
+        "data": data,
+        "error": null,
+        "meta": {
+            "mode": mode,
+            "version": CONTRACT_VERSION
+        }
+    })
+}
+
+fn error_envelope(code: &str, message: &str, recoverable: bool, mode: &'static str) -> Value {
+    serde_json::json!({
+        "ok": false,
+        "service": SERVICE_NAME,
+        "trace_id": null,
+        "data": null,
+        "error": {
+            "code": code,
+            "message": message,
+            "recoverable": recoverable
+        },
+        "meta": {
+            "mode": mode,
+            "version": CONTRACT_VERSION
+        }
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InboxItem {
     id: Uuid,
@@ -2365,11 +2408,12 @@ async fn ingest(data: web::Data<AppState>, payload: web::Bytes) -> impl Responde
     let request = match serde_json::from_slice::<IngestRequest>(&payload) {
         Ok(request) => request,
         Err(_) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "status": "error",
-                "reason": "invalid_ingest_payload",
-                "recoverable": true
-            }));
+            return HttpResponse::BadRequest().json(error_envelope(
+                "INVALID_INGEST_PAYLOAD",
+                "Invalid ingest payload",
+                true,
+                runtime_mode(&data.convex_config),
+            ));
         }
     };
 
@@ -4686,38 +4730,44 @@ async fn item_timeline(
     HttpResponse::Ok().json(timeline)
 }
 
-async fn health() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": "healthy",
-        "service": "rust-api"
-    }))
+async fn health(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(ok_envelope(
+        serde_json::json!({
+            "status": "healthy",
+            "reachable": true
+        }),
+        runtime_mode(&data.convex_config),
+    ))
 }
 
 async fn status(data: web::Data<AppState>) -> impl Responder {
     let convex_connected = data.convex_config.is_connected();
-    HttpResponse::Ok().json(serde_json::json!({
-        "service": "rust-api",
-        "reachable": true,
-        "mode": if convex_connected { "connected" } else { "standalone" },
-        "convex": if convex_connected { "connected" } else { "missing" }
-    }))
+    let mode = runtime_mode(&data.convex_config);
+    HttpResponse::Ok().json(ok_envelope(
+        serde_json::json!({
+            "reachable": true,
+            "convex": if convex_connected { "connected" } else { "missing" }
+        }),
+        mode,
+    ))
 }
 
-async fn ingest_contract() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": "error",
-        "reason": "method_not_supported",
-        "recoverable": true,
-        "expected_method": "POST"
-    }))
+async fn ingest_contract(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(error_envelope(
+        "METHOD_NOT_SUPPORTED",
+        "Only POST is supported for this endpoint",
+        true,
+        runtime_mode(&data.convex_config),
+    ))
 }
 
-async fn simulate() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": "ok",
-        "mode": "stub",
-        "simulation_id": Uuid::new_v4().to_string()
-    }))
+async fn simulate(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(ok_envelope(
+        serde_json::json!({
+            "simulation_id": Uuid::new_v4().to_string()
+        }),
+        runtime_mode(&data.convex_config),
+    ))
 }
 
 fn app_config(cfg: &mut web::ServiceConfig) {
@@ -4755,17 +4805,16 @@ fn app_config(cfg: &mut web::ServiceConfig) {
 }
 
 fn load_convex_config() -> ConvexConfig {
-    match Config::from_env() {
-        Ok(config) => ConvexConfig {
-            deployment_url: Some(config.convex_url),
-            admin_key: Some(config.convex_admin_key),
-        },
-        Err(error) => {
-            log::warn!(
-                "Convex not configured - running in standalone mode ({error}). Set CONVEX_URL and CONVEX_ADMIN_KEY (for Fly: `fly secrets set CONVEX_URL=... CONVEX_ADMIN_KEY=... -a <app>`)."
-            );
-            ConvexConfig::default()
-        }
+    let config = Config::load();
+    if config.mode() == "standalone" {
+        log::warn!(
+            "Convex not configured - running in standalone mode. Set CONVEX_URL and CONVEX_ADMIN_KEY (for Fly: `fly secrets set CONVEX_URL=... CONVEX_ADMIN_KEY=... -a <app>`)."
+        );
+    }
+
+    ConvexConfig {
+        deployment_url: config.convex_url,
+        admin_key: config.convex_admin_key,
     }
 }
 
@@ -4817,8 +4866,11 @@ mod tests {
         let req = test::TestRequest::get().uri("/health").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
 
-        assert_eq!(response["status"], "healthy");
+        assert_eq!(response["ok"], true);
         assert_eq!(response["service"], "rust-api");
+        assert_eq!(response["data"]["status"], "healthy");
+        assert_eq!(response["meta"]["mode"], "standalone");
+        assert_eq!(response["meta"]["version"], "pr35");
     }
 
     #[actix_web::test]
@@ -4828,10 +4880,11 @@ mod tests {
         let req = test::TestRequest::get().uri("/status").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
 
+        assert_eq!(response["ok"], true);
         assert_eq!(response["service"], "rust-api");
-        assert_eq!(response["reachable"], true);
-        assert_eq!(response["mode"], "standalone");
-        assert_eq!(response["convex"], "missing");
+        assert_eq!(response["data"]["reachable"], true);
+        assert_eq!(response["meta"]["mode"], "standalone");
+        assert_eq!(response["data"]["convex"], "missing");
     }
 
     #[actix_web::test]
@@ -4846,8 +4899,9 @@ mod tests {
         let req = test::TestRequest::get().uri("/status").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
 
-        assert_eq!(response["mode"], "connected");
-        assert_eq!(response["convex"], "connected");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["meta"]["mode"], "connected");
+        assert_eq!(response["data"]["convex"], "connected");
     }
 
     #[actix_web::test]
@@ -4857,10 +4911,10 @@ mod tests {
         let req = test::TestRequest::get().uri("/ingest").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
 
-        assert_eq!(response["status"], "error");
-        assert_eq!(response["reason"], "method_not_supported");
-        assert_eq!(response["recoverable"], true);
-        assert_eq!(response["expected_method"], "POST");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "METHOD_NOT_SUPPORTED");
+        assert_eq!(response["error"]["recoverable"], true);
+        assert_eq!(response["meta"]["mode"], "standalone");
     }
 
     #[actix_web::test]
@@ -4875,9 +4929,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body: Value = test::read_body_json(response).await;
-        assert_eq!(body["status"], "error");
-        assert_eq!(body["reason"], "invalid_ingest_payload");
-        assert_eq!(body["recoverable"], true);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "INVALID_INGEST_PAYLOAD");
+        assert_eq!(body["error"]["recoverable"], true);
+        assert_eq!(body["meta"]["mode"], "standalone");
     }
 
     #[actix_web::test]
@@ -4887,9 +4942,9 @@ mod tests {
         let req = test::TestRequest::get().uri("/simulate").to_request();
         let response: Value = test::call_and_read_body_json(&app, req).await;
 
-        assert_eq!(response["status"], "ok");
-        assert_eq!(response["mode"], "stub");
-        assert!(response["simulation_id"].as_str().is_some());
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["meta"]["mode"], "standalone");
+        assert!(response["data"]["simulation_id"].as_str().is_some());
     }
 
     #[actix_web::test]
