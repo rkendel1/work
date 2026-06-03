@@ -18,10 +18,13 @@ use uuid::Uuid;
 
 mod recommendation_engine;
 mod config;
+pub(crate) mod routes;
 use config::Config;
+use routes::app_config;
 
 const SERVICE_NAME: &str = "rust-api";
 const CONTRACT_VERSION: &str = "pr35";
+const ROUTER_ACTIVE_MARKER: &str = "router=app_config::ACTIVE";
 
 fn runtime_mode(convex_config: &ConvexConfig) -> &'static str {
     if convex_config.is_connected() {
@@ -682,7 +685,7 @@ impl Default for State {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ConvexConfig {
+pub(crate) struct ConvexConfig {
     deployment_url: Option<String>,
     admin_key: Option<String>,
 }
@@ -693,7 +696,7 @@ impl ConvexConfig {
     }
 }
 
-struct AppState {
+pub(crate) struct AppState {
     state: Mutex<State>,
     convex_config: ConvexConfig,
     client: Client,
@@ -701,7 +704,7 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(convex_config: ConvexConfig) -> Self {
+    pub(crate) fn new(convex_config: ConvexConfig) -> Self {
         Self {
             state: Mutex::new(State::default()),
             convex_config,
@@ -4770,38 +4773,45 @@ async fn simulate(data: web::Data<AppState>) -> impl Responder {
     ))
 }
 
-fn app_config(cfg: &mut web::ServiceConfig) {
-    cfg.route("/health", web::get().to(health))
-        .route("/status", web::get().to(status))
-        .route("/simulate", web::get().to(simulate))
-        .route("/ingest", web::get().to(ingest_contract))
-        .route("/ingest", web::post().to(ingest))
-        .route("/signals", web::post().to(ingest_signal))
-        .route("/extract", web::post().to(extract))
-        .route("/tenants", web::get().to(list_tenants))
-        .route("/tenants", web::post().to(create_tenant))
-        .route("/org/units", web::get().to(list_org_units))
-        .route("/org/units", web::post().to(create_org_unit))
-        .route("/business-rules", web::get().to(list_business_rules))
-        .route("/business-rules", web::post().to(create_business_rule))
-        .route("/actions", web::get().to(list_actions))
-        .route("/actions", web::post().to(create_action))
-        .route("/actions/execute", web::post().to(execute_action))
-        .route("/executions", web::get().to(list_executions))
-        .route("/executions/{id}", web::get().to(get_execution))
-        .route("/vault/keys", web::get().to(list_vault_keys))
-        .route("/vault/keys", web::post().to(upsert_vault_key))
-        .route("/vault/keys", web::delete().to(delete_vault_key))
-        .route("/items", web::get().to(list_items))
-        .route("/items/{id}/timeline", web::get().to(item_timeline))
-        .route("/work", web::get().to(list_work))
-        .route("/behavioral-patterns", web::get().to(list_behavioral_patterns))
-        .route("/operational-artifacts", web::get().to(list_operational_artifacts))
-        .route("/process-graph", web::get().to(get_process_graph))
-        .route("/work/routing-preview", web::get().to(work_routing_preview))
-        .route("/work/{id}/selection", web::post().to(select_work_action))
-        .route("/work/{id}/outcome", web::post().to(record_work_outcome))
-        .route("/webhooks/postmark", web::post().to(postmark_inbound));
+async fn router_debug() -> impl Responder {
+    HttpResponse::Ok().body(ROUTER_ACTIVE_MARKER)
+}
+
+async fn verify_router_mount(app_state: web::Data<AppState>) -> std::io::Result<()> {
+    let app = actix_web::test::init_service(
+        App::new()
+            .app_data(app_state)
+            .configure(app_config)
+            .route("/__router", web::get().to(router_debug)),
+    )
+    .await;
+
+    let health_response = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get().uri("/health").to_request(),
+    )
+    .await;
+    if !health_response.status().is_success() {
+        return Err(std::io::Error::other(format!(
+            "router sanity check failed: /health returned {}",
+            health_response.status()
+        )));
+    }
+
+    let router_response = actix_web::test::call_and_read_body(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri("/__router")
+            .to_request(),
+    )
+    .await;
+    if router_response.as_ref() != ROUTER_ACTIVE_MARKER.as_bytes() {
+        return Err(std::io::Error::other(
+            "router sanity check failed: /__router marker mismatch",
+        ));
+    }
+
+    Ok(())
 }
 
 fn load_convex_config() -> ConvexConfig {
@@ -4822,6 +4832,8 @@ fn load_convex_config() -> ConvexConfig {
 async fn main() -> std::io::Result<()> {
     let app_state = web::Data::new(AppState::new(load_convex_config()));
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    verify_router_mount(app_state.clone()).await?;
+    println!("Router sanity check passed: {}", ROUTER_ACTIVE_MARKER);
 
     HttpServer::new(move || {
         App::new()
@@ -4837,6 +4849,7 @@ async fn main() -> std::io::Result<()> {
             )
             .app_data(app_state.clone())
             .configure(app_config)
+            .route("/__router", web::get().to(router_debug))
     })
         .bind(format!("0.0.0.0:{port}"))?
         .run()
