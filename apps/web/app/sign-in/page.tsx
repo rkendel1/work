@@ -1,11 +1,15 @@
-"use client";
-
 import { SignIn } from "@clerk/nextjs";
+import { redirect } from "next/navigation";
 
 export default function SignInPage() {
+  if (process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true") {
+    redirect("/");
+  }
+
+  const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const clerkConfigured =
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace-with") &&
+    clerkPublishableKey &&
+    /^pk_(test|live)_[A-Za-z0-9_-]+$/.test(clerkPublishableKey) &&
     (process.env.NODE_ENV !== "development" ||
       process.env.NEXT_PUBLIC_ENABLE_CLERK_IN_DEV === "true");
 

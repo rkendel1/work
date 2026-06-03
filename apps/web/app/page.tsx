@@ -24,9 +24,13 @@ async function fetchInitial<T>(path: string, tenantId?: string): Promise<T[]> {
 export default async function Home() {
   const headerStore = await headers();
   const host = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
-  const tenantId = headerStore.get("x-tenant-id") ?? undefined;
+  const authBypassEnabled = process.env.NEXT_PUBLIC_ENABLE_AUTH_BYPASS === "true";
+  const tenantSlug = tenantSlugFromHost(host);
+  const tenantId =
+    headerStore.get("x-tenant-id") ??
+    (authBypassEnabled && !tenantSlug ? "default" : undefined);
 
-  if (!tenantSlugFromHost(host)) {
+  if (!tenantSlug && !authBypassEnabled) {
     return (
       <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center gap-8 px-6 py-20">
         <section className="space-y-4">
