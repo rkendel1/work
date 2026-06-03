@@ -270,6 +270,7 @@ struct SignalIngestRequest {
     normalized_content: Option<String>,
     metadata: Option<SignalMetadataInput>,
     tenant_id: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -323,6 +324,7 @@ struct PostmarkInboundRequest {
     text_body: Option<String>,
     html_body: Option<String>,
     message_id: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -594,6 +596,7 @@ struct ExecuteActionRequest {
     action_name: Option<String>,
     provider: Option<String>,
     payload: Option<Value>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -962,6 +965,14 @@ fn resolve_tenant_id(tenant_id: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_TENANT_ID)
         .to_string()
+}
+
+fn resolve_idempotency_key(explicit_key: Option<&str>, fallback: String) -> String {
+    explicit_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback)
 }
 
 fn datetime_from_unix_timestamp(timestamp: i64) -> Option<DateTime<Utc>> {
@@ -2497,10 +2508,24 @@ async fn ingest_signal(
             .as_ref()
             .and_then(|metadata| metadata.channel.clone()),
     };
+    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let idempotency_key = resolve_idempotency_key(
+        request.idempotency_key.as_deref(),
+        format!(
+            "{tenant_id}:{source_type}:{normalized_content}:{}",
+            raw_payload
+        ),
+    );
+    if let Some(existing) = data
+        .event_bus
+        .get_idempotency("ingest_signal", &idempotency_key)
+        .and_then(|value| serde_json::from_value::<InboxItem>(value).ok())
+    {
+        return HttpResponse::Ok().json(existing);
+    }
 
-    let (signal_event, inbox_item, received_event) = {
+    let (signal_event, inbox_item, received_event, published_event_ids) = {
         let mut state = lock_state(&data);
-        let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
         ensure_tenant_exists(&mut state, &tenant_id);
         let flow = runtime_flow::ingest_signal_to_inbox(
             &mut state,
@@ -2515,18 +2540,26 @@ async fn ingest_signal(
                 metadata,
             },
         );
-        (flow.signal_event, flow.inbox_item, flow.received_event)
+        (
+            flow.signal_event,
+            flow.inbox_item,
+            flow.received_event,
+            flow.published_event_ids,
+        )
     };
 
+    let mut projection_error = None;
     if let Err(error) =
         forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
     {
         eprintln!("failed to forward signal event to convex: {error}");
+        projection_error = Some(error.to_string());
     }
     if let Err(error) =
         forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await
     {
         eprintln!("failed to forward inbox item to convex: {error}");
+        projection_error = Some(error.to_string());
     }
     if let Some(event) = received_event {
         if let Err(error) = forward_ingress_event_to_convex(
@@ -2538,14 +2571,30 @@ async fn ingest_signal(
         .await
         {
             eprintln!("failed to forward ingress event to convex: {error}");
+            projection_error = Some(error.to_string());
         }
     }
+    if let Some(error) = projection_error {
+        for event_id in &published_event_ids {
+            data.event_bus
+                .mark_projection_failure(event_id, error.clone());
+        }
+    } else {
+        for event_id in &published_event_ids {
+            data.event_bus.mark_projection_success(event_id);
+        }
+    }
+    data.event_bus.put_idempotency(
+        "ingest_signal",
+        &idempotency_key,
+        serde_json::to_value(&inbox_item).unwrap_or_else(|_| serde_json::json!({})),
+    );
 
     HttpResponse::Created().json(inbox_item)
 }
 
 async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) -> impl Responder {
-    let (work_item, is_new, status_updates, recommendation_events) = {
+    let (work_item, is_new, status_updates, recommendation_events, published_event_ids) = {
         let mut state = lock_state(&data);
         match runtime_flow::extract_work_from_inbox(
             &mut state,
@@ -2557,6 +2606,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
                 flow.is_new,
                 flow.status_updates,
                 flow.recommendation_events,
+                flow.published_event_ids,
             ),
             Err(runtime_flow::WorkExtractionError::InboxItemNotFound) => {
                 return HttpResponse::NotFound().body("inbox item not found");
@@ -2565,10 +2615,12 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
     };
 
     if is_new {
+        let mut projection_error = None;
         if let Err(error) =
             forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
         {
             eprintln!("failed to forward work item to convex: {error}");
+            projection_error = Some(error.to_string());
         }
         for (inbox_item_id, event) in &status_updates {
             if let Err(error) = forward_status_update_to_convex(
@@ -2580,6 +2632,7 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             .await
             {
                 eprintln!("failed to forward ingress status update to convex: {error}");
+                projection_error = Some(error.to_string());
             }
         }
         for (inbox_item_id, event) in &recommendation_events {
@@ -2592,6 +2645,17 @@ async fn extract(data: web::Data<AppState>, request: web::Json<ExtractRequest>) 
             .await
             {
                 eprintln!("failed to forward recommendation event to convex: {error}");
+                projection_error = Some(error.to_string());
+            }
+        }
+        if let Some(error) = projection_error {
+            for event_id in &published_event_ids {
+                data.event_bus
+                    .mark_projection_failure(event_id, error.clone());
+            }
+        } else {
+            for event_id in &published_event_ids {
+                data.event_bus.mark_projection_success(event_id);
             }
         }
         HttpResponse::Created().json(work_item)
@@ -2615,6 +2679,20 @@ async fn postmark_inbound(
         .as_ref()
         .and_then(|from_full| from_full.email.clone())
         .or_else(|| payload.from.clone());
+    let idempotency_key = resolve_idempotency_key(
+        payload
+            .idempotency_key
+            .as_deref()
+            .or(payload.message_id.as_deref()),
+        format!("postmark:{source}:{content}"),
+    );
+    if let Some(existing) = data
+        .event_bus
+        .get_idempotency("postmark_inbound", &idempotency_key)
+        .and_then(|value| serde_json::from_value::<PostmarkWebhookResponse>(value).ok())
+    {
+        return HttpResponse::Ok().json(existing);
+    }
 
     let (
         signal_event,
@@ -2623,6 +2701,8 @@ async fn postmark_inbound(
         status_updates,
         received_event,
         recommendations_event,
+        ingestion_published_event_ids,
+        extraction_published_event_ids,
     ) = {
         let mut state = lock_state(&data);
         let tenant_id = DEFAULT_TENANT_ID.to_string();
@@ -2647,12 +2727,14 @@ async fn postmark_inbound(
         let signal_event = flow.signal_event;
         let inbox_item = flow.inbox_item;
         let received_event = flow.received_event;
+        let ingestion_published_event_ids = flow.published_event_ids;
         let work_flow =
             runtime_flow::extract_work_from_inbox(&mut state, &data.event_bus, inbox_item.id)
                 .expect("work extraction should succeed for newly ingested inbox item");
         let work_item = work_flow.work_item;
         let status_updates = work_flow.status_updates;
         let recommendations_event = work_flow.recommendation_events[0].1.clone();
+        let extraction_published_event_ids = work_flow.published_event_ids;
         (
             signal_event,
             inbox_item,
@@ -2660,18 +2742,23 @@ async fn postmark_inbound(
             status_updates,
             received_event,
             recommendations_event,
+            ingestion_published_event_ids,
+            extraction_published_event_ids,
         )
     };
 
+    let mut projection_error = None;
     if let Err(error) =
         forward_signal_event_to_convex(&data.client, &data.convex_config, &signal_event).await
     {
         eprintln!("failed to forward postmark signal event to convex: {error}");
+        projection_error = Some(error.to_string());
     }
     if let Err(error) =
         forward_inbox_to_convex(&data.client, &data.convex_config, &inbox_item).await
     {
         eprintln!("failed to forward postmark inbox item to convex: {error}");
+        projection_error = Some(error.to_string());
     }
     if let Some(event) = received_event {
         if let Err(error) = forward_ingress_event_to_convex(
@@ -2683,6 +2770,7 @@ async fn postmark_inbound(
         .await
         {
             eprintln!("failed to forward postmark ingress event to convex: {error}");
+            projection_error = Some(error.to_string());
         }
     }
     if let Err(error) = forward_ingress_event_to_convex(
@@ -2694,11 +2782,13 @@ async fn postmark_inbound(
     .await
     {
         eprintln!("failed to forward postmark recommendation event to convex: {error}");
+        projection_error = Some(error.to_string());
     }
 
     if let Err(error) = forward_work_to_convex(&data.client, &data.convex_config, &work_item).await
     {
         eprintln!("failed to forward postmark work item to convex: {error}");
+        projection_error = Some(error.to_string());
     }
     for (inbox_item_id, event) in &status_updates {
         if let Err(error) = forward_status_update_to_convex(
@@ -2710,13 +2800,33 @@ async fn postmark_inbound(
         .await
         {
             eprintln!("failed to forward postmark ingress status update to convex: {error}");
+            projection_error = Some(error.to_string());
+        }
+    }
+    let mut published_event_ids = ingestion_published_event_ids;
+    published_event_ids.extend(extraction_published_event_ids);
+    if let Some(error) = projection_error {
+        for event_id in &published_event_ids {
+            data.event_bus
+                .mark_projection_failure(event_id, error.clone());
+        }
+    } else {
+        for event_id in &published_event_ids {
+            data.event_bus.mark_projection_success(event_id);
         }
     }
 
-    HttpResponse::Created().json(PostmarkWebhookResponse {
+    let response = PostmarkWebhookResponse {
         inbox_item,
         work_item,
-    })
+    };
+    data.event_bus.put_idempotency(
+        "postmark_inbound",
+        &idempotency_key,
+        serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({})),
+    );
+
+    HttpResponse::Created().json(response)
 }
 
 async fn create_tenant(
@@ -3262,6 +3372,24 @@ async fn execute_action(
         .payload
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
+    let idempotency_key = resolve_idempotency_key(
+        request.idempotency_key.as_deref(),
+        format!(
+            "{}:{}:{}:{:?}:{}",
+            tenant_id,
+            request.work_item_id,
+            request.action_id.unwrap_or_default(),
+            request.action_name,
+            payload
+        ),
+    );
+    if let Some(existing) = data
+        .event_bus
+        .get_idempotency("execute_action", &idempotency_key)
+        .and_then(|value| serde_json::from_value::<ExecutionResultRecord>(value).ok())
+    {
+        return HttpResponse::Ok().json(existing);
+    }
 
     let (action, work_item, provider, secrets) = {
         let state = lock_state(&data);
@@ -3402,12 +3530,18 @@ async fn execute_action(
 
     let mut state = lock_state(&data);
     state.execution_results.push(execution.clone());
-    runtime_flow::emit_action_executed_event(
+    let event_id = runtime_flow::emit_action_executed_event(
         &data.event_bus,
         &tenant_id,
         execution.id,
         action.id,
         &execution.status,
+    );
+    data.event_bus.mark_projection_success(&event_id);
+    data.event_bus.put_idempotency(
+        "execute_action",
+        &idempotency_key,
+        serde_json::to_value(&execution).unwrap_or_else(|_| serde_json::json!({})),
     );
     refresh_behavioral_patterns_for_tenant(&mut state, &tenant_id);
     HttpResponse::Created().json(execution)
@@ -4934,6 +5068,7 @@ mod tests {
                 text_body: Some("Conference room is too hot".to_string()),
                 html_body: None,
                 message_id: Some("abc-123".to_string()),
+                idempotency_key: None,
             })
             .to_request();
 
@@ -4953,6 +5088,43 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(work.len(), 1);
         assert_eq!(items[0].status, "work_generated");
+    }
+
+    #[actix_web::test]
+    async fn postmark_webhook_is_idempotent_for_same_message_key() {
+        let app = test::init_service(build_app(test_state())).await;
+        let payload = PostmarkInboundRequest {
+            from: Some("alerts@example.com".to_string()),
+            from_full: Some(PostmarkAddress {
+                email: Some("alerts@example.com".to_string()),
+            }),
+            subject: Some("HVAC broken on floor 3".to_string()),
+            text_body: Some("Conference room is too hot".to_string()),
+            html_body: None,
+            message_id: Some("abc-123".to_string()),
+            idempotency_key: None,
+        };
+
+        let first_req = test::TestRequest::post()
+            .uri("/webhooks/postmark")
+            .set_json(&payload)
+            .to_request();
+        let first: PostmarkWebhookResponse = test::call_and_read_body_json(&app, first_req).await;
+
+        let second_req = test::TestRequest::post()
+            .uri("/webhooks/postmark")
+            .set_json(&payload)
+            .to_request();
+        let second_resp = test::call_service(&app, second_req).await;
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second: PostmarkWebhookResponse = test::read_body_json(second_resp).await;
+
+        assert_eq!(first.inbox_item.id, second.inbox_item.id);
+        assert_eq!(first.work_item.id, second.work_item.id);
+
+        let items_req = test::TestRequest::get().uri("/items").to_request();
+        let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
+        assert_eq!(items.len(), 1);
     }
 
     #[actix_web::test]
@@ -5591,6 +5763,74 @@ mod tests {
                     && result == "success"
             )
         }));
+    }
+
+    #[actix_web::test]
+    async fn execute_action_is_idempotent_with_same_key() {
+        let app = test::init_service(build_app(test_state())).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&serde_json::json!({
+                "source": "email",
+                "content": "HVAC issue in Room A",
+                "tenantId": "acme"
+            }))
+            .to_request();
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+
+        let create_action_req = test::TestRequest::post()
+            .uri("/actions")
+            .set_json(&serde_json::json!({
+                "tenantId": "acme",
+                "name": "Idempotent Action",
+                "description": "Test action",
+                "category": "update",
+                "classificationTypes": ["maintenance_request"],
+                "executionProvider": "internal",
+                "active": true
+            }))
+            .to_request();
+        let action: ActionDefinition = test::call_and_read_body_json(&app, create_action_req).await;
+
+        let execute_payload = serde_json::json!({
+            "tenantId": "acme",
+            "workItemId": work_item.id,
+            "actionId": action.id,
+            "provider": "internal",
+            "idempotencyKey": "exec-1",
+            "payload": { "note": "run-once" }
+        });
+        let first_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&execute_payload)
+            .to_request();
+        let first: ExecutionResultRecord = test::call_and_read_body_json(&app, first_req).await;
+
+        let second_req = test::TestRequest::post()
+            .uri("/actions/execute")
+            .set_json(&execute_payload)
+            .to_request();
+        let second_resp = test::call_service(&app, second_req).await;
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second: ExecutionResultRecord = test::read_body_json(second_resp).await;
+
+        assert_eq!(first.id, second.id);
+
+        let list_req = test::TestRequest::get()
+            .uri("/executions?tenantId=acme")
+            .to_request();
+        let executions: Vec<ExecutionResultRecord> =
+            test::call_and_read_body_json(&app, list_req).await;
+        assert_eq!(executions.len(), 1);
     }
 
     #[actix_web::test]

@@ -2,8 +2,8 @@ use actix_web::web;
 use chrono::Utc;
 
 use super::super::{
-    AppState, IngestRequest, InboxItem, SignalMetadata, default_signal_provenance,
-    ensure_tenant_exists, forward_ingress_event_to_convex, forward_inbox_to_convex,
+    AppState, InboxItem, IngestRequest, SignalMetadata, default_signal_provenance,
+    ensure_tenant_exists, forward_inbox_to_convex, forward_ingress_event_to_convex,
     forward_signal_event_to_convex, lock_state, normalize_signal_content, resolve_tenant_id,
     runtime_flow,
 };
@@ -18,7 +18,7 @@ impl IngestionService {
     }
 
     pub async fn ingest_raw(&self, request: IngestRequest) -> InboxItem {
-        let (signal_event, item, received_event) = {
+        let (signal_event, item, received_event, published_event_ids) = {
             let mut state = lock_state(&self.state);
             let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
             ensure_tenant_exists(&mut state, &tenant_id);
@@ -44,19 +44,30 @@ impl IngestionService {
                     },
                 },
             );
-            (flow.signal_event, flow.inbox_item, flow.received_event)
+            (
+                flow.signal_event,
+                flow.inbox_item,
+                flow.received_event,
+                flow.published_event_ids,
+            )
         };
 
-        if let Err(error) =
-            forward_signal_event_to_convex(&self.state.client, &self.state.convex_config, &signal_event)
-                .await
+        let mut projection_error = None;
+        if let Err(error) = forward_signal_event_to_convex(
+            &self.state.client,
+            &self.state.convex_config,
+            &signal_event,
+        )
+        .await
         {
             eprintln!("failed to forward signal event to convex: {error}");
+            projection_error = Some(error.to_string());
         }
         if let Err(error) =
             forward_inbox_to_convex(&self.state.client, &self.state.convex_config, &item).await
         {
             eprintln!("failed to forward inbox item to convex: {error}");
+            projection_error = Some(error.to_string());
         }
         if let Some(event) = received_event {
             if let Err(error) = forward_ingress_event_to_convex(
@@ -68,6 +79,18 @@ impl IngestionService {
             .await
             {
                 eprintln!("failed to forward ingress event to convex: {error}");
+                projection_error = Some(error.to_string());
+            }
+        }
+        if let Some(error) = projection_error {
+            for event_id in &published_event_ids {
+                self.state
+                    .event_bus
+                    .mark_projection_failure(event_id, error.clone());
+            }
+        } else {
+            for event_id in &published_event_ids {
+                self.state.event_bus.mark_projection_success(event_id);
             }
         }
 
