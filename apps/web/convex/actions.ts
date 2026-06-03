@@ -911,6 +911,10 @@ export const seedTenantDataset = mutationGeneric({
       await ctx.db.insert("signal_events", {
         tenantId: args.tenantId,
         sourceType: "github_seed",
+        provenance: {
+          origin: "github",
+          generatedBy: "seedGithubSignal",
+        },
         rawPayload: {
           externalId: ingressExternalId,
           repository: "rkendel1/work",
