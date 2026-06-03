@@ -52,6 +52,7 @@ type ActionDefinition = {
   assigned_org_unit_id: string;
   default_owner_role?: string;
   active: boolean;
+  execution_provider?: string;
 };
 
 type OrgUnit = {
@@ -67,6 +68,27 @@ type WorkRoutingPreview = {
   action_name?: string | null;
   assigned_org_unit?: OrgUnit | null;
   routing_path: OrgUnit[];
+};
+
+type VaultKey = {
+  id: string;
+  tenant_id: string;
+  key_name: string;
+  provider: string;
+  created_at: number;
+};
+
+type ActionExecution = {
+  id: string;
+  tenant_id: string;
+  work_item_id: string;
+  action_id: string;
+  status: string;
+  provider: string;
+  external_ref?: string;
+  payload: unknown;
+  message?: string;
+  executed_at?: string;
 };
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -161,6 +183,7 @@ export function InboxClient({
   const [newActionClassification, setNewActionClassification] = useState(
     "maintenance_request",
   );
+  const [newActionExecutionProvider, setNewActionExecutionProvider] = useState("internal");
   const [newActionOrgUnitId, setNewActionOrgUnitId] = useState("");
   const [newActionDefaultOwnerRole, setNewActionDefaultOwnerRole] = useState("");
   const [tenantName, setTenantName] = useState("");
@@ -180,23 +203,39 @@ export function InboxClient({
   );
   const [routingPreviewActionName, setRoutingPreviewActionName] = useState("");
   const [routingPreview, setRoutingPreview] = useState<WorkRoutingPreview | null>(null);
+  const [vaultKeys, setVaultKeys] = useState<VaultKey[]>([]);
+  const [vaultProvider, setVaultProvider] = useState("slack");
+  const [vaultKeyName, setVaultKeyName] = useState("slack_bot_token");
+  const [vaultSecretValue, setVaultSecretValue] = useState("");
+  const [executionsByWork, setExecutionsByWork] = useState<Record<string, ActionExecution[]>>({});
   const selectedSetupPack =
     SETUP_PACKS.find((pack) => pack.vertical === tenantVertical) ?? SETUP_PACKS[0];
 
   const refresh = useCallback(async () => {
     const tenantQuery = `tenantId=${encodeURIComponent(tenantId)}`;
-    const [items, work, tenantList, actionList, orgUnitList] = await Promise.all([
+    const [items, work, tenantList, actionList, orgUnitList, keyList, executionList] = await Promise.all([
       fetchJson<InboxItem[]>(`/api/items?${tenantQuery}`),
       fetchJson<WorkItem[]>(`/api/work?${tenantQuery}`),
       fetchJson<Tenant[]>("/api/tenants"),
       fetchJson<ActionDefinition[]>(`/api/actions?${tenantQuery}`),
       fetchJson<OrgUnit[]>(`/api/org/units?${tenantQuery}`),
+      fetchJson<VaultKey[]>(`/api/vault/keys?${tenantQuery}`),
+      fetchJson<ActionExecution[]>(`/api/executions?${tenantQuery}`),
     ]);
     setInboxItems(items);
     setWorkItems(work);
     setTenants(tenantList);
     setActions(actionList);
     setOrgUnits(orgUnitList);
+    setVaultKeys(keyList);
+    const groupedExecutions = executionList.reduce<Record<string, ActionExecution[]>>((acc, execution) => {
+      if (!acc[execution.work_item_id]) {
+        acc[execution.work_item_id] = [];
+      }
+      acc[execution.work_item_id].push(execution);
+      return acc;
+    }, {});
+    setExecutionsByWork(groupedExecutions);
     setNewActionOrgUnitId((current) => current || orgUnitList[0]?.id || "");
     setSelectedInboxId((current) => {
       if (current && items.some((item) => item.id === current)) {
@@ -278,6 +317,7 @@ export function InboxClient({
         description: newActionDescription,
         category: newActionCategory,
         classificationTypes: [newActionClassification],
+        executionProvider: newActionExecutionProvider,
         assignedOrgUnitId: newActionOrgUnitId || undefined,
         defaultOwnerRole: newActionDefaultOwnerRole || undefined,
         active: true,
@@ -292,6 +332,7 @@ export function InboxClient({
     setNewActionName("");
     setNewActionDescription("");
     setNewActionDefaultOwnerRole("");
+    setNewActionExecutionProvider("internal");
     await refresh();
   }
 
@@ -322,6 +363,46 @@ export function InboxClient({
     setSetupMessage(
       `We've configured your Operations Inbox for ${tenant.vertical} • ${tenant.industry}.`,
     );
+  }
+
+  async function onSaveVaultKey(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const response = await fetch("/api/vault/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        provider: vaultProvider,
+        keyName: vaultKeyName,
+        value: vaultSecretValue,
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setVaultSecretValue("");
+    await refresh();
+  }
+
+  async function onDeleteVaultKey(key: VaultKey) {
+    setError(null);
+    const query = new URLSearchParams({
+      tenantId,
+      keyName: key.key_name,
+      provider: key.provider,
+    });
+    const response = await fetch(`/api/vault/keys?${query.toString()}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+    await refresh();
   }
 
   async function onSelectRecommendedAction(workId: string, actionTitle: string) {
@@ -375,6 +456,37 @@ export function InboxClient({
       ...current,
       [workId]: "Outcome recorded and learning captured.",
     }));
+    await refresh();
+  }
+
+  async function onExecuteAction(work: WorkItem) {
+    setError(null);
+    const selectedActionName = selectedActionByWork[work.id] ?? work.recommended_actions?.[0]?.title;
+    if (!selectedActionName) {
+      setError("Select or recommend an action before execution.");
+      return;
+    }
+
+    const selectedAction = actions.find((action) => action.name === selectedActionName);
+    const response = await fetch("/api/actions/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenantId,
+        workItemId: work.id,
+        actionId: selectedAction?.id,
+        actionName: selectedActionName,
+        payload: {
+          message: `${selectedActionName} for ${work.title}`,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
     await refresh();
   }
 
@@ -664,6 +776,24 @@ export function InboxClient({
                   {workMessages[work.id] ? (
                     <p className="mt-2 text-xs text-emerald-700">{workMessages[work.id]}</p>
                   ) : null}
+                  <div className="mt-3 space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => void onExecuteAction(work)}
+                      className="rounded bg-zinc-900 px-3 py-1 text-xs text-white"
+                    >
+                      Execute Selected Action
+                    </button>
+                    <div className="space-y-1 text-xs text-zinc-600">
+                      {(executionsByWork[work.id] ?? []).map((execution) => (
+                        <p key={execution.id}>
+                          {execution.status === "success" ? "✔" : execution.status === "failed" ? "✖" : "…" }{" "}
+                          {execution.provider.toUpperCase()} {execution.status}
+                          {execution.message ? ` — ${execution.message}` : ""}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}
@@ -704,6 +834,18 @@ export function InboxClient({
               required
             />
             <select
+              value={newActionExecutionProvider}
+              onChange={(event) => setNewActionExecutionProvider(event.target.value)}
+              className="rounded border px-3 py-2"
+            >
+              <option value="internal">Internal only</option>
+              <option value="slack">Slack</option>
+              <option value="jira">Jira</option>
+              <option value="email">Email</option>
+              <option value="webhook">Webhook</option>
+              <option value="nango">External integration (Nango)</option>
+            </select>
+            <select
               value={newActionOrgUnitId}
               onChange={(event) => setNewActionOrgUnitId(event.target.value)}
               className="rounded border px-3 py-2"
@@ -737,6 +879,9 @@ export function InboxClient({
                   Assigned Team:{" "}
                   {orgUnitById(action.assigned_org_unit_id)?.name ?? "Unknown team"}
                   {action.default_owner_role ? ` • Owner Role: ${action.default_owner_role}` : ""}
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Execution Target: {(action.execution_provider ?? "internal").toUpperCase()}
                 </p>
               </div>
             ))}
@@ -886,6 +1031,76 @@ export function InboxClient({
               {setupMessage}
             </p>
           ) : null}
+          <div className="mt-6 rounded border p-4">
+            <h3 className="mb-2 text-base font-semibold">Integrations Vault</h3>
+            <p className="mb-3 text-sm text-zinc-600">
+              Connected systems are managed per tenant. Credentials are encrypted server-side.
+            </p>
+            <div className="mb-3 grid gap-2 text-sm md:grid-cols-2">
+              <div className="rounded border p-2">
+                <p className="font-medium">Slack</p>
+                <p className="text-zinc-600">Connect / Configure</p>
+              </div>
+              <div className="rounded border p-2">
+                <p className="font-medium">Jira</p>
+                <p className="text-zinc-600">Connect / Configure</p>
+              </div>
+              <div className="rounded border p-2">
+                <p className="font-medium">Email (SMTP)</p>
+                <p className="text-zinc-600">Add Credentials</p>
+              </div>
+              <div className="rounded border p-2">
+                <p className="font-medium">Webhook Endpoints</p>
+                <p className="text-zinc-600">Create Endpoint</p>
+              </div>
+            </div>
+            <form onSubmit={onSaveVaultKey} className="grid gap-2 md:grid-cols-4">
+              <select
+                value={vaultProvider}
+                onChange={(event) => setVaultProvider(event.target.value)}
+                className="rounded border px-3 py-2"
+              >
+                <option value="slack">Slack</option>
+                <option value="jira">Jira</option>
+                <option value="email">Email</option>
+                <option value="webhook">Webhook</option>
+                <option value="nango">External integration (Nango)</option>
+              </select>
+              <input
+                value={vaultKeyName}
+                onChange={(event) => setVaultKeyName(event.target.value)}
+                className="rounded border px-3 py-2"
+                placeholder="Key name (e.g. slack_bot_token)"
+                required
+              />
+              <input
+                value={vaultSecretValue}
+                onChange={(event) => setVaultSecretValue(event.target.value)}
+                className="rounded border px-3 py-2"
+                placeholder="Secret value"
+                required
+              />
+              <button type="submit" className="rounded bg-zinc-900 px-4 py-2 text-white">
+                Save Key
+              </button>
+            </form>
+            <div className="mt-3 space-y-2">
+              {vaultKeys.map((key) => (
+                <div key={key.id} className="flex items-center justify-between rounded border px-3 py-2 text-sm">
+                  <p>
+                    {key.provider.toUpperCase()} • {key.key_name}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void onDeleteVaultKey(key)}
+                    className="rounded border px-2 py-1 text-xs"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
       ) : null}
     </div>
