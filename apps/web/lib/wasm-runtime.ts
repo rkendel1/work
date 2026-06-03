@@ -11,6 +11,8 @@ type WasmBindgenExports = WebAssembly.Exports & {
     align: number,
   ) => number;
   __wbindgen_free: (ptr: number, size: number, align: number) => void;
+  __wbindgen_start: () => void;
+  __wbindgen_externrefs: WebAssembly.Table;
   process: (retPtr: number, ptr: number, len: number) => void;
   memory: WebAssembly.Memory;
 };
@@ -103,9 +105,25 @@ function createProcessBinding(wasm: WasmBindgenExports): WasmRuntime["process"] 
 
 export async function loadWasm(): Promise<WasmRuntime> {
   if (!wasmPromise) {
-    wasmPromise = WebAssembly.instantiate(readWasmArtifact(), {})
+    let exports: WasmBindgenExports;
+    const imports = {
+      "./ingress_engine_bg.js": {
+        __wbindgen_init_externref_table: () => {
+          const table = exports.__wbindgen_externrefs;
+          const offset = table.grow(4);
+          table.set(0, undefined);
+          table.set(offset + 0, undefined);
+          table.set(offset + 1, null);
+          table.set(offset + 2, true);
+          table.set(offset + 3, false);
+        },
+      },
+    };
+
+    wasmPromise = WebAssembly.instantiate(readWasmArtifact(), imports)
       .then(({ instance }) => {
-        const exports = instance.exports as WasmBindgenExports;
+        exports = instance.exports as WasmBindgenExports;
+        exports.__wbindgen_start();
         return { process: createProcessBinding(exports) };
       })
       .catch((error: unknown) => {
