@@ -37,6 +37,22 @@ pub enum DomainEvent {
         action_id: String,
         result: String,
     },
+    MessageCreated {
+        tenant_id: String,
+        message_id: String,
+    },
+    NotificationCreated {
+        tenant_id: String,
+        notification_id: String,
+    },
+    RecipientResolved {
+        tenant_id: String,
+        recipient_id: String,
+    },
+    DeliveryRecorded {
+        tenant_id: String,
+        delivery_id: String,
+    },
     VaultKeyUpdated {
         tenant_id: String,
         key_id: String,
@@ -52,6 +68,10 @@ impl DomainEvent {
             | DomainEvent::WorkCreated { tenant_id, .. }
             | DomainEvent::WorkRouted { tenant_id, .. }
             | DomainEvent::ActionExecuted { tenant_id, .. }
+            | DomainEvent::MessageCreated { tenant_id, .. }
+            | DomainEvent::NotificationCreated { tenant_id, .. }
+            | DomainEvent::RecipientResolved { tenant_id, .. }
+            | DomainEvent::DeliveryRecorded { tenant_id, .. }
             | DomainEvent::VaultKeyUpdated { tenant_id, .. } => tenant_id,
         }
     }
@@ -64,6 +84,10 @@ impl DomainEvent {
             DomainEvent::WorkCreated { .. } => "WorkCreated",
             DomainEvent::WorkRouted { .. } => "WorkRouted",
             DomainEvent::ActionExecuted { .. } => "ActionExecuted",
+            DomainEvent::MessageCreated { .. } => "MessageCreated",
+            DomainEvent::NotificationCreated { .. } => "NotificationCreated",
+            DomainEvent::RecipientResolved { .. } => "RecipientResolved",
+            DomainEvent::DeliveryRecorded { .. } => "DeliveryRecorded",
             DomainEvent::VaultKeyUpdated { .. } => "VaultKeyUpdated",
         }
     }

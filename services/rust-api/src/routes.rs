@@ -6,13 +6,14 @@ use super::{
     ingest_signal, item_timeline, list_actions, list_behavioral_patterns, list_business_rules,
     list_executions, list_items, list_operational_artifacts, list_org_units, list_tenants,
     list_vault_keys, list_work, postmark_inbound, record_work_outcome, select_work_action,
-    simulate, status, upsert_vault_key, work_routing_preview,
+    simulate, status, upsert_vault_key, validate_system, work_routing_preview,
 };
 
 pub fn app_config(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(health))
         .route("/status", web::get().to(status))
-        .route("/simulate", web::get().to(simulate))
+    .route("/__system/validate", web::get().to(validate_system))
+    .route("/simulate", web::get().to(simulate))
         .route("/ingest", web::get().to(ingest_contract))
         .route("/ingest", web::post().to(ingest))
         .route("/signals", web::post().to(ingest_signal))
