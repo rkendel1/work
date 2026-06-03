@@ -80,8 +80,14 @@ function requiredEnv(name) {
 }
 
 function normalizeConvexAdminKey(rawValue) {
-  const withoutQuotes = rawValue.replace(/^['"]|['"]$/g, "");
-  return withoutQuotes.replace(/^(?:Convex|Bearer)(?:\s+|$)/i, "").trim();
+  let normalized = rawValue.trim().replace(/^['"]|['"]$/g, "");
+  normalized = normalized.replace(
+    /^(?:CONVEX_ADMIN_KEY|CONVEX_DEPLOY_KEY|CONVEX_DEPLOYMENT_KEY|CONVEX_ACCESS_TOKEN)\s*=\s*/i,
+    "",
+  );
+  normalized = normalized.replace(/^authorization\s*:\s*/i, "");
+  normalized = normalized.replace(/^(?:Convex|Bearer)(?:\s+|$)/i, "").trim();
+  return normalized.replace(/\s+/g, "");
 }
 
 async function convexMutation(path, args) {

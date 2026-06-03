@@ -151,7 +151,8 @@ CLERK_SECRET_KEY=<clerk-secret-key> \
 npm run seed:simulation
 ```
 
-Use the raw Convex admin key value (no leading auth scheme prefix).
+Use the raw Convex admin key value (no leading auth scheme prefix). The seed script
+also tolerates copied values like `CONVEX_ADMIN_KEY=...` and `Authorization: Convex ...`.
 
 If you run locally without exporting env vars inline, the script automatically loads
 `/tmp/workspace/rkendel1/work/apps/web/.env.local`.
