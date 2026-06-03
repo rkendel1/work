@@ -21,8 +21,8 @@ export default function SignInPage() {
       <SignIn
         path="/sign-in"
         signUpUrl="/sign-up"
-        forceRedirectUrl="/onboarding"
-        fallbackRedirectUrl="/onboarding"
+        forceRedirectUrl="/"
+        fallbackRedirectUrl="/"
       />
     </main>
   );
