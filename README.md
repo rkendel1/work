@@ -151,10 +151,18 @@ CLERK_SECRET_KEY=<clerk-secret-key> \
 npm run seed:simulation
 ```
 
+If you run locally without exporting env vars inline, the script automatically loads
+`/tmp/workspace/rkendel1/work/apps/web/.env.local`.
+
 The seed script creates these tenants in Convex:
 - `default` (Property Management / Commercial Real Estate)
 - `northstar_facilities` (Property Management / Commercial Real Estate)
 - `harbor_clinic_ops` (Healthcare / Clinic)
+
+It also seeds tenant accounts plus representative records across the schema/backend
+(inbound signal, inbox item, work item, mappings, assignments, notifications,
+outcomes, execution results, process graph, artifacts, and tenant secrets) for
+early capability testing.
 
 It also ensures a Clerk login exists for testing (defaults can be overridden with env vars):
 - Email: `sim.tester@canonflo.local`

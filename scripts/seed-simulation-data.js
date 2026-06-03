@@ -1,5 +1,8 @@
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
+
 const DEFAULT_TENANTS = [
   {
     id: "default",
@@ -29,6 +32,44 @@ const DEFAULT_TENANTS = [
     industry: "Clinic",
   },
 ];
+
+const DEFAULT_SEED_ACCOUNTS = DEFAULT_TENANTS.map((tenant) => ({
+  tenantId: tenant.id,
+  email: `ops+${tenant.id}@canonflo.local`,
+  name: `${tenant.displayName} Operator`,
+  handle: `ops-${tenant.id}`,
+  role: "admin",
+}));
+
+function loadLocalEnv() {
+  const envPath = path.resolve(__dirname, "..", "apps", "web", ".env.local");
+  if (!fs.existsSync(envPath)) {
+    return;
+  }
+
+  const envContents = fs.readFileSync(envPath, "utf8");
+  for (const rawLine of envContents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    if (!key || process.env[key]) {
+      continue;
+    }
+    const rawValue = line.slice(separatorIndex + 1).trim();
+    const unquoted = rawValue.replace(/^['"]|['"]$/g, "");
+    process.env[key] = unquoted;
+  }
+
+  if (!process.env.CONVEX_DEPLOYMENT_URL && process.env.NEXT_PUBLIC_CONVEX_URL) {
+    process.env.CONVEX_DEPLOYMENT_URL = process.env.NEXT_PUBLIC_CONVEX_URL;
+  }
+}
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -141,7 +182,27 @@ async function seedConvexLoginUser({ email, tenantId }) {
   });
 }
 
+async function seedTenantAccount(account) {
+  await convexMutation("actions:upsertUserByEmail", {
+    email: account.email,
+    name: account.name,
+    handle: account.handle,
+    role: account.role,
+    tenantId: account.tenantId,
+  });
+}
+
+async function seedTenantDataset(account) {
+  await convexMutation("actions:seedTenantDataset", {
+    tenantId: account.tenantId,
+    userEmail: account.email,
+    userName: account.name,
+    userHandle: account.handle,
+  });
+}
+
 async function main() {
+  loadLocalEnv();
   const seedEmail = process.env.SEED_TEST_LOGIN_EMAIL?.trim() || "sim.tester@canonflo.local";
   const seedPassword = process.env.SEED_TEST_LOGIN_PASSWORD?.trim() || "SimTester#2026";
   const seedFirstName = process.env.SEED_TEST_LOGIN_FIRST_NAME?.trim() || "Simulation";
@@ -159,10 +220,17 @@ async function main() {
   });
   await seedConvexLoginUser({ email: seedEmail, tenantId: DEFAULT_TENANTS[0].id });
 
+  console.log("Seeding tenant accounts and full dataset...");
+  for (const account of DEFAULT_SEED_ACCOUNTS) {
+    await seedTenantAccount(account);
+    await seedTenantDataset(account);
+  }
+
   console.log("");
   console.log("Seed complete.");
   console.log(`Login email: ${seedEmail}`);
   console.log(`Login password: ${seedPassword}`);
+  console.log(`Seeded tenant accounts: ${DEFAULT_SEED_ACCOUNTS.map((account) => account.email).join(", ")}`);
   if (clerkResult.seeded) {
     console.log(`Clerk user: ${clerkResult.existed ? "already existed" : "created"}`);
   } else {
