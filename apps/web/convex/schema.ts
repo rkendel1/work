@@ -30,6 +30,9 @@ export default defineSchema({
     title: v.string(),
     summary: v.string(),
     status: v.string(),
+    assignedOrgUnitId: v.id("org_units"),
+    currentOwnerId: v.optional(v.string()),
+    routingPath: v.array(v.id("org_units")),
     recommendedActions: v.optional(
       v.array(
         v.object({
@@ -55,6 +58,15 @@ export default defineSchema({
     vertical: v.string(),
     industry: v.string(),
   }).index("by_slug", ["slug"]),
+  org_units: defineTable({
+    tenantId: v.string(),
+    name: v.string(),
+    type: v.string(),
+    parentId: v.optional(v.id("org_units")),
+    metadata: v.optional(v.any()),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_name", ["tenantId", "name"]),
   core_classifications: defineTable({
     key: v.string(),
     label: v.string(),
@@ -74,6 +86,8 @@ export default defineSchema({
     description: v.string(),
     category: v.string(),
     classificationTypes: v.array(v.string()),
+    assignedOrgUnitId: v.id("org_units"),
+    defaultOwnerRole: v.optional(v.string()),
     active: v.boolean(),
   })
     .index("by_tenant", ["tenantId"])

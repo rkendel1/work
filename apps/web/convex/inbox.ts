@@ -119,6 +119,10 @@ export const createWorkItem = mutationGeneric({
     title: v.string(),
     summary: v.string(),
     status: v.string(),
+    assignedOrgUnitExternalId: v.optional(v.string()),
+    routingActionName: v.optional(v.string()),
+    currentOwnerId: v.optional(v.string()),
+    routingPathExternalIds: v.optional(v.array(v.string())),
     recommendedActions: v.optional(
       v.array(
         v.object({
@@ -143,6 +147,36 @@ export const createWorkItem = mutationGeneric({
       return existing._id;
     }
 
+    const matchedAction = args.routingActionName
+      ? await ctx.db
+          .query("actions")
+          .withIndex("by_tenant_name", (query) => query.eq("tenantId", args.tenantId))
+          .filter((query) => query.eq(query.field("name"), args.routingActionName))
+          .first()
+      : null;
+    let assignedOrgUnitId = matchedAction?.assignedOrgUnitId;
+    if (!assignedOrgUnitId) {
+      const fallbackOrgUnit = await ctx.db
+        .query("org_units")
+        .withIndex("by_tenant", (query) => query.eq("tenantId", args.tenantId))
+        .first();
+      assignedOrgUnitId =
+        fallbackOrgUnit?._id ??
+        (await ctx.db.insert("org_units", {
+          tenantId: args.tenantId,
+          name: "Operations",
+          type: "department",
+        }));
+    }
+    const routingPath = [];
+    let currentId = assignedOrgUnitId;
+    while (currentId) {
+      routingPath.push(currentId);
+      const current = await ctx.db.get(currentId);
+      currentId = current?.parentId;
+    }
+    routingPath.reverse();
+
     return await ctx.db.insert("work_items", {
       tenantId: args.tenantId,
       externalId: args.externalId,
@@ -151,6 +185,9 @@ export const createWorkItem = mutationGeneric({
       title: args.title,
       summary: args.summary,
       status: args.status,
+      assignedOrgUnitId,
+      currentOwnerId: args.currentOwnerId,
+      routingPath,
       recommendedActions: args.recommendedActions,
     });
   },

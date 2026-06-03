@@ -42,8 +42,11 @@ Convex operational state
 - `GET /items`
 - `GET /items/{id}/timeline`
 - `GET /work`
+- `GET /work/routing-preview`
 - `POST /work/{id}/selection`
 - `POST /work/{id}/outcome`
+- `GET /org/units`
+- `POST /org/units`
 
 ## Convex Data Model
 
@@ -55,6 +58,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 - `action_selections`
 - `work_outcomes`
 - `actions`
+- `org_units`
 - `users`
 - `tenants`
 
