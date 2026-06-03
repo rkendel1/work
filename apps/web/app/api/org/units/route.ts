@@ -23,14 +23,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const response = await fetch(`${RUST_INGRESS_URL}/org/units`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const body = await response.text();
-  return new NextResponse(body, {
-    status: response.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  try {
+    const response = await fetch(`${RUST_INGRESS_URL}/org/units`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.text();
+    return new NextResponse(body, {
+      status: response.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    return NextResponse.json({ error: "Organization service unavailable" }, { status: 503 });
+  }
 }
