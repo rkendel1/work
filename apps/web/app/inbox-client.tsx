@@ -810,7 +810,10 @@ export function InboxClient({
   const selectedInbox = inboxItems.find((item) => item.id === selectedInboxId) ?? null;
   const selectedWork = workItems.find((work) => work.inbox_item_id === selectedInboxId) ?? null;
   const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
-  const inboundAddress = `${selectedTenant?.slug ?? tenantId}@inbound.canonflo.com`;
+  const normalizedInboundLocalPart = (selectedTenant?.slug ?? tenantId)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "");
+  const inboundAddress = `${normalizedInboundLocalPart || "default"}@inbound.canonflo.com`;
   const inferredActionTitles = Array.from(
     new Set(
       workItems.flatMap((work) =>
