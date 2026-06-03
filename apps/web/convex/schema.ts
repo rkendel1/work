@@ -217,6 +217,19 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_from_to", ["tenantId", "fromNodeId", "toNodeId"]),
+  operational_artifacts: defineTable({
+    tenantId: v.string(),
+    name: v.string(),
+    type: v.string(),
+    orgUnitId: v.optional(v.id("org_units")),
+    source: v.string(),
+    version: v.number(),
+    content: v.any(),
+    derivedFrom: v.array(v.string()),
+    lastUpdatedAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_type", ["tenantId", "type"]),
   operational_packs: defineTable({
     vertical: v.string(),
     industry: v.string(),
