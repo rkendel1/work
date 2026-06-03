@@ -15,7 +15,7 @@ Convex operational state
 - `/tmp/workspace/rkendel1/work/package.json` — root deployment orchestrator (Vercel + Convex bootstrap + WASM build)
 - `/tmp/workspace/rkendel1/work/vercel.json` — Vercel build/install configuration
 - `/tmp/workspace/rkendel1/work/apps/web` — Next.js frontend + API routes + Better Auth + Convex functions
-- `/tmp/workspace/rkendel1/work/services/ingress-engine` — Rust Actix ingestion/extraction service
+- `/tmp/workspace/rkendel1/work/services/rust-api` — Rust Actix ingestion/extraction service
 - `/tmp/workspace/rkendel1/work/scripts/bootstrap-convex.ts` — idempotent Convex bootstrap hook
 
 ## Implemented Stack
@@ -97,7 +97,7 @@ Defined in `/tmp/workspace/rkendel1/work/apps/web/convex/schema.ts`:
 ### 1) Rust ingress service
 
 ```bash
-cd /tmp/workspace/rkendel1/work/services/ingress-engine
+cd /tmp/workspace/rkendel1/work/services/rust-api
 cargo run
 ```
 
@@ -123,7 +123,7 @@ npm run build
 Rust tests:
 
 ```bash
-cd /tmp/workspace/rkendel1/work/services/ingress-engine
+cd /tmp/workspace/rkendel1/work/services/rust-api
 cargo test
 ```
 
@@ -145,7 +145,7 @@ npm run build:wasm
 
 ```bash
 cd /tmp/workspace/rkendel1/work
-CONVEX_DEPLOYMENT_URL=https://<deployment>.convex.cloud \
+CONVEX_URL=https://<deployment>.convex.cloud \
 CONVEX_ADMIN_KEY=<raw-admin-key> \
 CLERK_SECRET_KEY=<clerk-secret-key> \
 npm run seed:simulation
@@ -187,9 +187,9 @@ For Next.js (`apps/web/.env.local`):
 - `SEED_TEST_LOGIN_FIRST_NAME` (optional)
 - `SEED_TEST_LOGIN_LAST_NAME` (optional)
 
-For Rust ingress (`services/ingress-engine` environment):
+For Rust ingress (`services/rust-api` environment):
 
-- `CONVEX_DEPLOYMENT_URL` (e.g. `https://<deployment>.convex.cloud`)
+- `CONVEX_URL` (e.g. `https://<deployment>.convex.cloud`)
 - `CONVEX_ADMIN_KEY`
 - `VAULT_ENCRYPTION_KEY` (optional base64-encoded 32-byte key for tenant secret encryption)
 

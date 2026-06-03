@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -16,6 +17,8 @@ use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 mod recommendation_engine;
+mod config;
+use config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InboxItem {
@@ -4427,8 +4430,16 @@ async fn item_timeline(
     HttpResponse::Ok().json(timeline)
 }
 
+async fn health() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "healthy",
+        "service": "rust-api"
+    }))
+}
+
 fn app_config(cfg: &mut web::ServiceConfig) {
-    cfg.route("/ingest", web::post().to(ingest))
+    cfg.route("/health", web::get().to(health))
+        .route("/ingest", web::post().to(ingest))
         .route("/signals", web::post().to(ingest_signal))
         .route("/extract", web::post().to(extract))
         .route("/tenants", web::get().to(list_tenants))
@@ -4458,18 +4469,35 @@ fn app_config(cfg: &mut web::ServiceConfig) {
 }
 
 fn load_convex_config() -> ConvexConfig {
+    let config = Config::from_env();
+
     ConvexConfig {
-        deployment_url: std::env::var("CONVEX_DEPLOYMENT_URL").ok(),
-        admin_key: std::env::var("CONVEX_ADMIN_KEY").ok(),
+        deployment_url: Some(config.convex_url),
+        admin_key: Some(config.convex_admin_key),
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let app_state = web::Data::new(AppState::new(load_convex_config()));
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
 
-    HttpServer::new(move || App::new().app_data(app_state.clone()).configure(app_config))
-        .bind(("127.0.0.1", 8080))?
+    HttpServer::new(move || {
+        App::new()
+            .wrap(
+                Cors::default()
+                    .allow_any_header()
+                    .allow_any_method()
+                    .allowed_origin("https://canonflo.com")
+                    .allowed_origin("https://www.canonflo.com")
+                    .allowed_origin_fn(|origin, _| {
+                        origin.to_str().unwrap_or("").ends_with(".vercel.app")
+                    }),
+            )
+            .app_data(app_state.clone())
+            .configure(app_config)
+    })
+        .bind(format!("0.0.0.0:{port}"))?
         .run()
         .await
 }
@@ -4481,6 +4509,17 @@ mod tests {
 
     fn test_state() -> web::Data<AppState> {
         web::Data::new(AppState::new(ConvexConfig::default()))
+    }
+
+    #[actix_web::test]
+    async fn health_endpoint_returns_service_status() {
+        let app = test::init_service(App::new().app_data(test_state()).configure(app_config)).await;
+
+        let req = test::TestRequest::get().uri("/health").to_request();
+        let response: Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(response["status"], "healthy");
+        assert_eq!(response["service"], "rust-api");
     }
 
     #[actix_web::test]
