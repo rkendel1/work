@@ -36,10 +36,10 @@ export default async function Home() {
   );
   const { userId } =
     clerkConfigured && !authBypassEnabled ? await auth() : { userId: null };
-  const tenantSlug = tenantSlugFromHost(host) ?? (isRootHost(host) ? "default" : null);
+  const tenantSlug = tenantSlugFromHost(host);
   const tenantId =
     headerStore.get("x-tenant-id") ??
-    (authBypassEnabled && (!tenantSlug || tenantSlug === "default") ? "default" : undefined);
+    (authBypassEnabled && !tenantSlug ? "default" : undefined);
 
   if (clerkConfigured && !authBypassEnabled && userId && isRootHost(host)) {
     redirect("/onboarding");
