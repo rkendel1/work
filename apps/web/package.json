@@ -11,8 +11,7 @@
     "convex:codegen": "convex codegen"
   },
   "dependencies": {
-    "@convex-dev/better-auth": "^0.12.2",
-    "better-auth": "^1.6.14",
+    "@clerk/nextjs": "^6.24.0",
     "convex": "^1.40.0",
     "next": "16.2.7",
     "postmark": "^4.0.7",
