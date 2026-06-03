@@ -23,6 +23,7 @@ mod infrastructure;
 mod recommendation_engine;
 pub(crate) mod routes;
 mod runtime_flow;
+mod simulation;
 use config::Config;
 use routes::app_config;
 
@@ -209,6 +210,7 @@ struct ProcessNode {
     name: String,
     #[serde(rename = "type")]
     node_type: String,
+    frequency: u64,
     source: String,
     confidence: f64,
     first_seen_at: i64,
@@ -642,6 +644,8 @@ struct State {
     behavioral_patterns: Vec<BehavioralPattern>,
     process_nodes: Vec<ProcessNode>,
     process_edges: Vec<ProcessEdge>,
+    operational_crosswalks: HashMap<String, domain::crosswalk::OperationalCrosswalk>,
+    as_is_models: HashMap<String, domain::as_is_model::AsIsModel>,
     operational_artifacts: Vec<OperationalArtifact>,
     tenant_secrets: Vec<TenantSecret>,
 }
@@ -668,6 +672,18 @@ impl Default for State {
         let org_units = org_units_from_pack(&default_tenant.id, &default_pack);
         let actions = actions_from_pack(&default_tenant.id, &default_pack, &org_units);
         let classifications = classifications_from_pack(&default_tenant.id, &default_pack);
+        let default_crosswalk = bootstrap_crosswalk(&default_tenant);
+        let mut operational_crosswalks = HashMap::new();
+        operational_crosswalks.insert(default_tenant.id.clone(), default_crosswalk.clone());
+        let mut as_is_models = HashMap::new();
+        as_is_models.insert(
+            default_tenant.id.clone(),
+            domain::as_is_model::AsIsModel {
+                tenant_id: default_tenant.id.clone(),
+                crosswalk: default_crosswalk,
+                process_graph: domain::process_graph::ProcessGraph::default(),
+            },
+        );
 
         Self {
             signal_events: Vec::new(),
@@ -685,6 +701,8 @@ impl Default for State {
             behavioral_patterns: Vec::new(),
             process_nodes: Vec::new(),
             process_edges: Vec::new(),
+            operational_crosswalks,
+            as_is_models,
             operational_artifacts: Vec::new(),
             tenant_secrets: Vec::new(),
         }
@@ -927,20 +945,31 @@ fn infer_operational_meaning(
     work_item_id: Uuid,
     classification: &str,
     summary: &str,
+    crosswalk_meaning: &application::crosswalk_engine::OperationalMeaning,
 ) -> OperationalMeaning {
+    let system_concept = crosswalk_meaning
+        .category
+        .clone()
+        .unwrap_or_else(|| classification.to_string());
+    let inferred_meaning = if system_concept.eq_ignore_ascii_case(classification) {
+        summary.to_string()
+    } else {
+        format!("{summary} (interpreted as {system_concept})")
+    };
     OperationalMeaning {
         tenant_id: tenant_id.to_string(),
         entity_type: "work_item".to_string(),
         entity_id: work_item_id.to_string(),
-        system_concept: classification.to_string(),
-        inferred_meaning: summary.to_string(),
+        system_concept: system_concept.clone(),
+        inferred_meaning,
         state: "inferred".to_string(),
-        confidence: 0.5,
+        confidence: f64::from(crosswalk_meaning.confidence).clamp(0.0, 1.0),
         evidence: vec![
             format!("classification:{classification}"),
+            format!("crosswalk_category:{system_concept}"),
             format!("summary:{summary}"),
         ],
-        crosswalk_version: None,
+        crosswalk_version: Some("phase5.crosswalk.v1".to_string()),
         updated_at: Utc::now().timestamp(),
     }
 }
@@ -1368,8 +1397,64 @@ fn onboarding_seed_signals(pack: &OperationalPack) -> Vec<&'static str> {
     ]
 }
 
+fn bootstrap_crosswalk(tenant: &Tenant) -> domain::crosswalk::OperationalCrosswalk {
+    domain::crosswalk::OperationalCrosswalk::from_pack(
+        &tenant.id,
+        &tenant.vertical,
+        &tenant.industry,
+    )
+}
+
+fn ensure_crosswalk_for_tenant(state: &mut State, tenant: &Tenant) {
+    let crosswalk = bootstrap_crosswalk(tenant);
+    state
+        .operational_crosswalks
+        .insert(tenant.id.clone(), crosswalk.clone());
+    state.as_is_models.insert(
+        tenant.id.clone(),
+        domain::as_is_model::AsIsModel {
+            tenant_id: tenant.id.clone(),
+            crosswalk,
+            process_graph: domain::process_graph::ProcessGraph::default(),
+        },
+    );
+}
+
+fn resolve_crosswalk_for_tenant(
+    state: &State,
+    tenant_id: &str,
+) -> domain::crosswalk::OperationalCrosswalk {
+    if let Some(crosswalk) = state.operational_crosswalks.get(tenant_id) {
+        return crosswalk.clone();
+    }
+    let tenant = state
+        .tenants
+        .iter()
+        .find(|tenant| tenant.id == tenant_id)
+        .cloned()
+        .unwrap_or(Tenant {
+            id: tenant_id.to_string(),
+            slug: normalize_identifier(tenant_id),
+            domain: format!("{}.{}", normalize_identifier(tenant_id), TENANT_BASE_DOMAIN),
+            name: tenant_id.to_string(),
+            display_name: tenant_id.to_string(),
+            vertical: "Custom".to_string(),
+            industry: "General".to_string(),
+            created_at: Utc::now().timestamp(),
+        });
+    bootstrap_crosswalk(&tenant)
+}
+
 fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
-    if state.tenants.iter().any(|tenant| tenant.id == tenant_id) {
+    if let Some(existing) = state
+        .tenants
+        .iter()
+        .find(|tenant| tenant.id == tenant_id)
+        .cloned()
+    {
+        if !state.operational_crosswalks.contains_key(tenant_id) {
+            ensure_crosswalk_for_tenant(state, &existing);
+        }
         let _ = ensure_default_org_unit(state, tenant_id);
         return;
     }
@@ -1384,7 +1469,8 @@ fn ensure_tenant_exists(state: &mut State, tenant_id: &str) {
         industry: "General".to_string(),
         created_at: Utc::now().timestamp(),
     };
-    state.tenants.push(tenant);
+    state.tenants.push(tenant.clone());
+    ensure_crosswalk_for_tenant(state, &tenant);
     let _ = ensure_default_org_unit(state, tenant_id);
 }
 
@@ -1931,11 +2017,22 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
     let title = classification_title(&classification_type).to_string();
     let summary = classification_result.reason.clone();
     let priority = priority_override.unwrap_or_else(|| "medium".to_string());
+    let crosswalk = resolve_crosswalk_for_tenant(state, &inbox_item.tenant_id);
+    let crosswalk_engine = application::crosswalk_engine::CrosswalkEngine::from(crosswalk);
+    let crosswalk_meaning =
+        crosswalk_engine.interpret(&domain::events::DomainEvent::SignalReceived {
+            tenant_id: inbox_item.tenant_id.clone(),
+            signal_id: inbox_item.id.to_string(),
+            source: inbox_item.source.clone(),
+            content: inbox_item.content.clone(),
+            timestamp: inbox_item.received_at,
+        });
     let operational_meaning = Some(infer_operational_meaning(
         &inbox_item.tenant_id,
         work_item_id,
         &classification_type,
         &summary,
+        &crosswalk_meaning,
     ));
 
     let work_item = WorkItem {
@@ -2893,6 +2990,7 @@ async fn create_tenant(
     };
     let org_units = org_units_from_pack(&id, &pack);
     state.tenants.push(tenant.clone());
+    ensure_crosswalk_for_tenant(&mut state, &tenant);
     state.org_units.extend(org_units.clone());
     state
         .actions
@@ -4020,40 +4118,60 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
 
     let mut node_ids_by_name: HashMap<String, Uuid> = HashMap::new();
     let mut process_nodes: Vec<ProcessNode> = Vec::new();
-    let mut ensure_node =
-        |name: &str, node_type: &str, source: &str, confidence: f64, org_unit_id: Option<Uuid>| {
-            if let Some(existing_id) = node_ids_by_name.get(name) {
-                if let Some(existing_node) = process_nodes
-                    .iter_mut()
-                    .find(|node| node.id == *existing_id)
-                {
-                    existing_node.confidence = existing_node.confidence.max(confidence);
-                    existing_node.first_seen_at = existing_node.first_seen_at.min(now);
-                    existing_node.last_seen_at = existing_node.last_seen_at.max(now);
-                    existing_node.source = source.to_string();
-                    existing_node.org_unit_id = org_unit_id;
-                }
-                *existing_id
-            } else {
-                let id = Uuid::new_v4();
-                process_nodes.push(ProcessNode {
-                    id,
-                    tenant_id: tenant_id.to_string(),
-                    org_unit_id,
-                    name: name.to_string(),
-                    node_type: node_type.to_string(),
-                    source: source.to_string(),
-                    confidence: confidence.clamp(0.0, 1.0),
-                    first_seen_at: now,
-                    last_seen_at: now,
-                });
-                node_ids_by_name.insert(name.to_string(), id);
-                id
+    let mut ensure_node = |name: &str,
+                           node_type: &str,
+                           source: &str,
+                           confidence: f64,
+                           org_unit_id: Option<Uuid>,
+                           frequency: u64| {
+        if let Some(existing_id) = node_ids_by_name.get(name) {
+            if let Some(existing_node) = process_nodes
+                .iter_mut()
+                .find(|node| node.id == *existing_id)
+            {
+                existing_node.confidence = existing_node.confidence.max(confidence);
+                existing_node.frequency = existing_node.frequency.saturating_add(frequency);
+                existing_node.first_seen_at = existing_node.first_seen_at.min(now);
+                existing_node.last_seen_at = existing_node.last_seen_at.max(now);
+                existing_node.source = source.to_string();
+                existing_node.org_unit_id = org_unit_id;
             }
-        };
+            *existing_id
+        } else {
+            let id = Uuid::new_v4();
+            process_nodes.push(ProcessNode {
+                id,
+                tenant_id: tenant_id.to_string(),
+                org_unit_id,
+                name: name.to_string(),
+                node_type: node_type.to_string(),
+                frequency,
+                source: source.to_string(),
+                confidence: confidence.clamp(0.0, 1.0),
+                first_seen_at: now,
+                last_seen_at: now,
+            });
+            node_ids_by_name.insert(name.to_string(), id);
+            id
+        }
+    };
 
-    let process_id = ensure_node(&process_name, "process", "inferred", 1.0, None);
-    let intake_id = ensure_node("Intake", "step", "inferred", 1.0, None);
+    let process_id = ensure_node(
+        &process_name,
+        "process",
+        "inferred",
+        1.0,
+        None,
+        tenant_work_items.len() as u64,
+    );
+    let intake_id = ensure_node(
+        "Intake",
+        "step",
+        "inferred",
+        1.0,
+        None,
+        tenant_work_items.len() as u64,
+    );
     let maintenance_review_org_unit = tenant_work_items
         .first()
         .map(|work_item| work_item.assigned_org_unit_id);
@@ -4063,6 +4181,7 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
         "inferred",
         (total_work / denominator).clamp(0.0, 1.0),
         maintenance_review_org_unit,
+        tenant_work_items.len() as u64,
     );
     let completion_id = ensure_node(
         "Completion",
@@ -4070,6 +4189,7 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
         "inferred",
         (completion_count / denominator).clamp(0.0, 1.0),
         None,
+        completion_count as u64,
     );
 
     let mut process_edges: Vec<ProcessEdge> = Vec::new();
@@ -4101,6 +4221,32 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
     add_edge(process_id, intake_id, "normal_flow", denominator);
     add_edge(intake_id, maintenance_review_id, "normal_flow", denominator);
 
+    let mut meaning_frequency: HashMap<String, u64> = HashMap::new();
+    for work_item in &tenant_work_items {
+        if let Some(meaning) = &work_item.operational_meaning {
+            *meaning_frequency
+                .entry(meaning.system_concept.clone())
+                .or_insert(0) += 1;
+        }
+    }
+    for (concept, frequency) in meaning_frequency {
+        let concept_id = ensure_node(
+            &concept,
+            "semantic_category",
+            "crosswalk",
+            (frequency as f64 / denominator).clamp(0.0, 1.0),
+            None,
+            frequency,
+        );
+        add_edge(intake_id, concept_id, "meaning_inferred", frequency as f64);
+        add_edge(
+            concept_id,
+            maintenance_review_id,
+            "normal_flow",
+            frequency as f64,
+        );
+    }
+
     let mut bypass_paths: Vec<String> = Vec::new();
     if drifted_selection_count > 0.0 {
         let override_id = ensure_node(
@@ -4109,6 +4255,7 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
             "inferred",
             (drifted_selection_count / denominator).clamp(0.0, 1.0),
             None,
+            drifted_selection_count as u64,
         );
         add_edge(
             maintenance_review_id,
@@ -4132,6 +4279,7 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
             "inferred",
             (escalated_work_count / denominator).clamp(0.0, 1.0),
             None,
+            escalated_work_count as u64,
         );
         add_edge(
             maintenance_review_id,
@@ -4155,6 +4303,7 @@ fn infer_process_graph(state: &mut State, tenant_id: &str) -> ProcessGraph {
             "inferred",
             (external_execution_count / denominator).clamp(0.0, 1.0),
             None,
+            external_execution_count as u64,
         );
         add_edge(
             maintenance_review_id,
@@ -4733,9 +4882,47 @@ async fn ingest_contract(data: web::Data<AppState>) -> impl Responder {
 }
 
 async fn simulate(data: web::Data<AppState>) -> impl Responder {
+    let tenant_id = DEFAULT_TENANT_ID.to_string();
+    let (as_is_model, inferred_categories) = {
+        let mut state = lock_state(&data);
+        ensure_tenant_exists(&mut state, &tenant_id);
+        let crosswalk = resolve_crosswalk_for_tenant(&state, &tenant_id);
+        let events: Vec<domain::events::DomainEvent> = state
+            .signal_events
+            .iter()
+            .filter(|signal| signal.tenant_id == tenant_id)
+            .map(|signal| domain::events::DomainEvent::SignalReceived {
+                tenant_id: signal.tenant_id.clone(),
+                signal_id: signal.id.to_string(),
+                source: signal.source_type.clone(),
+                content: signal.normalized_content.clone(),
+                timestamp: datetime_from_unix_timestamp(signal.metadata.timestamp)
+                    .unwrap_or_else(Utc::now),
+            })
+            .collect();
+        let replay_graph = simulation::simulate_as_is(events, crosswalk.clone());
+        let inferred_categories = replay_graph
+            .nodes
+            .iter()
+            .map(|node| node.label.clone())
+            .collect::<Vec<String>>();
+        let as_is_model = domain::as_is_model::AsIsModel {
+            tenant_id: tenant_id.clone(),
+            crosswalk,
+            process_graph: replay_graph,
+        };
+        state
+            .as_is_models
+            .insert(tenant_id.clone(), as_is_model.clone());
+        (as_is_model, inferred_categories)
+    };
+
     HttpResponse::Ok().json(ok_envelope(
         serde_json::json!({
-            "simulation_id": Uuid::new_v4().to_string()
+            "simulation_id": Uuid::new_v4().to_string(),
+            "tenant_id": tenant_id,
+            "crosswalk_terms": as_is_model.crosswalk.canonical_terms.len(),
+            "inferred_categories": inferred_categories
         }),
         runtime_mode(&data.convex_config),
     ))
@@ -4999,7 +5186,43 @@ mod tests {
         assert_eq!(operational_meaning.state, "inferred");
         assert!(operational_meaning.confidence > 0.0);
         assert!(!operational_meaning.evidence.is_empty());
+        assert_eq!(
+            operational_meaning.crosswalk_version.as_deref(),
+            Some("phase5.crosswalk.v1")
+        );
         assert_eq!(items[0].status, "work_generated");
+    }
+
+    #[actix_web::test]
+    async fn crosswalk_engine_relabels_meaning_from_signal_language() {
+        let app = test::init_service(build_app(test_state())).await;
+
+        let ingest_req = test::TestRequest::post()
+            .uri("/ingest")
+            .set_json(&IngestRequest {
+                source: "email".to_string(),
+                content: "Question about lease extension and terms".to_string(),
+                tenant_id: Some("default".to_string()),
+            })
+            .to_request();
+
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, ingest_req).await;
+
+        let extract_req = test::TestRequest::post()
+            .uri("/extract")
+            .set_json(&ExtractRequest {
+                inbox_item_id: inbox_item.id,
+            })
+            .to_request();
+
+        let work_item: WorkItem = test::call_and_read_body_json(&app, extract_req).await;
+        let meaning = work_item
+            .operational_meaning
+            .expect("work item should include crosswalk meaning");
+
+        assert_eq!(work_item.classification_type, "operational_request");
+        assert_eq!(meaning.system_concept, "lease_question");
+        assert!(meaning.confidence >= 0.2);
     }
 
     #[actix_web::test]
