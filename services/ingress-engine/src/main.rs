@@ -80,6 +80,22 @@ struct WorkItem {
     require_approval: bool,
     applied_rules: Vec<AppliedBusinessRule>,
     recommended_actions: Vec<RecommendedAction>,
+    operational_context: Option<OperationalContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationalContext {
+    tenant_id: String,
+    entity_type: String,
+    entity_id: String,
+    summary: String,
+    business_meaning: String,
+    operational_impact: String,
+    downstream_effects: Vec<String>,
+    risk_level: String,
+    urgency: String,
+    related_processes: Vec<String>,
+    last_computed_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -797,6 +813,118 @@ fn classification_title(classification: &str) -> &'static str {
         "billing_inquiry" => "Billing Inquiry",
         "scheduling_request" => "Scheduling Request",
         _ => "Operational Request",
+    }
+}
+
+fn priority_to_urgency(priority: &str) -> &'static str {
+    match priority {
+        "high" => "immediate",
+        "medium" => "soon",
+        _ => "routine",
+    }
+}
+
+fn classification_risk_level(classification: &str, priority: &str) -> &'static str {
+    if priority == "high" {
+        return "critical";
+    }
+
+    match classification {
+        "maintenance_request" => "high",
+        "billing_inquiry" | "scheduling_request" => "medium",
+        _ => "low",
+    }
+}
+
+fn operational_downstream_effects(classification: &str) -> Vec<String> {
+    match classification {
+        "maintenance_request" => vec![
+            "Potential SLA breach penalties".to_string(),
+            "Tenant satisfaction risk".to_string(),
+            "Facilities workload increase".to_string(),
+        ],
+        "billing_inquiry" => vec![
+            "Cashflow delay risk".to_string(),
+            "Customer trust impact".to_string(),
+            "Escalation to finance operations".to_string(),
+        ],
+        "scheduling_request" => vec![
+            "Service timeline slippage".to_string(),
+            "Coordination overhead increase".to_string(),
+            "Follow-up communication volume increase".to_string(),
+        ],
+        _ => vec![
+            "Operational ambiguity persists".to_string(),
+            "Manual triage effort increases".to_string(),
+            "Resolution latency can grow".to_string(),
+        ],
+    }
+}
+
+fn operational_related_processes(classification: &str) -> Vec<String> {
+    match classification {
+        "maintenance_request" => vec![
+            "maintenance_triage".to_string(),
+            "vendor_escalation".to_string(),
+            "sla_tracking".to_string(),
+        ],
+        "billing_inquiry" => vec![
+            "finance_review".to_string(),
+            "account_reconciliation".to_string(),
+            "response_approval".to_string(),
+        ],
+        "scheduling_request" => vec![
+            "availability_check".to_string(),
+            "resource_assignment".to_string(),
+            "stakeholder_notification".to_string(),
+        ],
+        _ => vec![
+            "signal_classification".to_string(),
+            "work_routing".to_string(),
+            "outcome_tracking".to_string(),
+        ],
+    }
+}
+
+fn build_operational_context(
+    tenant_id: &str,
+    work_item_id: Uuid,
+    classification: &str,
+    summary: &str,
+    priority: &str,
+    escalation_target: Option<&str>,
+    suppress_action: bool,
+    require_approval: bool,
+) -> OperationalContext {
+    let escalation_note = escalation_target
+        .map(|target| format!("Escalation target configured ({target})."))
+        .unwrap_or_else(|| "No escalation target configured.".to_string());
+    let execution_note = if suppress_action {
+        "Execution is currently suppressed by policy."
+    } else if require_approval {
+        "Execution requires approval before completion."
+    } else {
+        "Execution can proceed through normal routing."
+    };
+
+    OperationalContext {
+        tenant_id: tenant_id.to_string(),
+        entity_type: "work_item".to_string(),
+        entity_id: work_item_id.to_string(),
+        summary: summary.to_string(),
+        business_meaning: format!(
+            "{} interpreted as {} for tenant operations.",
+            classification_title(classification),
+            classification.replace('_', " ")
+        ),
+        operational_impact: format!(
+            "{execution_note} {escalation_note} Work remains open until routing and outcome closure."
+        ),
+        downstream_effects: operational_downstream_effects(classification),
+        risk_level: classification_risk_level(classification, priority).to_string(),
+        urgency: priority_to_urgency(priority).to_string(),
+        related_processes: operational_related_processes(classification),
+        last_computed_at: Utc::now().timestamp(),
     }
 }
 
@@ -1706,14 +1834,30 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
     } else {
         build_routing_path(state, final_assigned_org_unit_id)
     };
+    let work_item_id = Uuid::new_v4();
+    let classification_type = classification_result.classification.clone();
+    let title = classification_title(&classification_type).to_string();
+    let summary = classification_result.reason.clone();
+    let priority = priority_override.unwrap_or_else(|| "medium".to_string());
+    let operational_context = Some(build_operational_context(
+        &inbox_item.tenant_id,
+        work_item_id,
+        &classification_type,
+        &summary,
+        &priority,
+        escalation_target.as_deref(),
+        suppress_action,
+        require_approval,
+    ));
+
     let work_item = WorkItem {
-        id: Uuid::new_v4(),
+        id: work_item_id,
         tenant_id: inbox_item.tenant_id.clone(),
         inbox_item_id: inbox_item.id,
-        classification_type: classification_result.classification.clone(),
-        title: classification_title(&classification_result.classification).to_string(),
-        summary: classification_result.reason.clone(),
-        priority: priority_override.unwrap_or_else(|| "medium".to_string()),
+        classification_type,
+        title,
+        summary,
+        priority,
         status: "open".to_string(),
         assigned_org_unit_id: final_assigned_org_unit_id,
         current_owner_id: None,
@@ -1723,6 +1867,7 @@ fn create_work_item(state: &mut State, inbox_item: &InboxItem) -> WorkItem {
         require_approval,
         applied_rules,
         recommended_actions: classification_result.recommendations.clone(),
+        operational_context,
     };
 
     state.work_items.push(work_item.clone());
@@ -1837,6 +1982,7 @@ struct ConvexWorkArgs {
     routing_path_external_ids: Vec<String>,
     routing_action_name: Option<String>,
     recommended_actions: Vec<ConvexRecommendedAction>,
+    operational_context: Option<ConvexOperationalContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1845,6 +1991,19 @@ struct ConvexRecommendedAction {
     title: String,
     description: String,
     action_type: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvexOperationalContext {
+    summary: String,
+    business_meaning: String,
+    operational_impact: String,
+    downstream_effects: Vec<String>,
+    risk_level: String,
+    urgency: String,
+    related_processes: Vec<String>,
+    last_computed_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2028,6 +2187,19 @@ async fn forward_work_to_convex(
                     action_type: action.action_type.as_str().to_string(),
                 })
                 .collect(),
+            operational_context: work_item
+                .operational_context
+                .as_ref()
+                .map(|context| ConvexOperationalContext {
+                    summary: context.summary.clone(),
+                    business_meaning: context.business_meaning.clone(),
+                    operational_impact: context.operational_impact.clone(),
+                    downstream_effects: context.downstream_effects.clone(),
+                    risk_level: context.risk_level.clone(),
+                    urgency: context.urgency.clone(),
+                    related_processes: context.related_processes.clone(),
+                    last_computed_at: context.last_computed_at,
+                }),
         },
     )
     .await
@@ -4334,6 +4506,13 @@ mod tests {
         assert!(!work_item.routing_path.is_empty());
         assert_eq!(work_item.recommended_actions.len(), 3);
         assert_eq!(work_item.recommended_actions[0].title, "Inspect HVAC Unit");
+        let operational_context = work_item
+            .operational_context
+            .expect("work item should include operational context");
+        assert_eq!(operational_context.entity_type, "work_item");
+        assert_eq!(operational_context.risk_level, "high");
+        assert_eq!(operational_context.urgency, "soon");
+        assert!(!operational_context.downstream_effects.is_empty());
         assert_eq!(items[0].status, "work_generated");
     }
 
