@@ -65,7 +65,7 @@ function convexClient() {
   if (!url) {
     throw new Error("NEXT_PUBLIC_CONVEX_URL is required");
   }
-  return new ConvexHttpClient(url);
+  return new ConvexHttpClient(url.replace(/\/+$/, ""));
 }
 
 function defaultProvenance(sourceType: string): SignalProvenance {
