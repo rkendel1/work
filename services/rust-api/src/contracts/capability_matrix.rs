@@ -62,6 +62,34 @@ pub const CANONFLO_CAPABILITY_MATRIX: &[CapabilityOwnership] = &[
         owner: RuntimeOwner::Rust,
     },
     CapabilityOwnership {
+        capability: "Message Creation",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Recipient Resolution",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Notification Generation",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Delivery Tracking",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Communication Policies",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Escalation Rules",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "OperationalKnowledgeRuntime",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
         capability: "Notification Dispatch",
         owner: RuntimeOwner::Rust,
     },
@@ -82,6 +110,14 @@ pub const CANONFLO_CAPABILITY_MATRIX: &[CapabilityOwnership] = &[
         owner: RuntimeOwner::Rust,
     },
     CapabilityOwnership {
+        capability: "Emit Domain Events",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
+        capability: "Publish Projection Events",
+        owner: RuntimeOwner::Rust,
+    },
+    CapabilityOwnership {
         capability: "Read Models",
         owner: RuntimeOwner::Convex,
     },
@@ -94,15 +130,47 @@ pub const CANONFLO_CAPABILITY_MATRIX: &[CapabilityOwnership] = &[
         owner: RuntimeOwner::Convex,
     },
     CapabilityOwnership {
-        capability: "Tenant Metadata",
-        owner: RuntimeOwner::Convex,
-    },
-    CapabilityOwnership {
         capability: "Historical Analytics",
         owner: RuntimeOwner::Convex,
     },
     CapabilityOwnership {
         capability: "Projection Storage",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Store Projections",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Serve Queries",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "OperationalKnowledgeProjection",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "UserProfiles",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Memberships",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Preferences",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Message Views",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Inbox Queries",
+        owner: RuntimeOwner::Convex,
+    },
+    CapabilityOwnership {
+        capability: "Notification Read Models",
         owner: RuntimeOwner::Convex,
     },
     CapabilityOwnership {
@@ -119,6 +187,10 @@ pub const CANONFLO_CAPABILITY_MATRIX: &[CapabilityOwnership] = &[
     },
     CapabilityOwnership {
         capability: "Visualization",
+        owner: RuntimeOwner::NextJs,
+    },
+    CapabilityOwnership {
+        capability: "OperationalKnowledgeVisualization",
         owner: RuntimeOwner::NextJs,
     },
     CapabilityOwnership {
@@ -147,6 +219,22 @@ pub const CANONFLO_CAPABILITY_MATRIX: &[CapabilityOwnership] = &[
     },
     CapabilityOwnership {
         capability: "Feature Flags",
+        owner: RuntimeOwner::Shared,
+    },
+    CapabilityOwnership {
+        capability: "TenantDefinitions",
+        owner: RuntimeOwner::Shared,
+    },
+    CapabilityOwnership {
+        capability: "TenantConfiguration",
+        owner: RuntimeOwner::Shared,
+    },
+    CapabilityOwnership {
+        capability: "CrosswalkConfiguration",
+        owner: RuntimeOwner::Shared,
+    },
+    CapabilityOwnership {
+        capability: "OrgStructure",
         owner: RuntimeOwner::Shared,
     },
 ];
@@ -185,9 +273,7 @@ pub fn render_markdown() -> String {
     }
 
     let mut markdown = String::from("# CanonFlo Capability Ownership Matrix\n\n");
-    markdown.push_str(
-        "Generated from `services/rust-api/src/contracts/capability_matrix.rs`.\n\n",
-    );
+    markdown.push_str("Generated from `services/rust-api/src/contracts/capability_matrix.rs`.\n\n");
     markdown.push_str(&section("Rust Owns", &rust_owned));
     markdown.push_str(&section("Convex Owns", &convex_owned));
     markdown.push_str(&section("Next.js Owns", &next_owned));

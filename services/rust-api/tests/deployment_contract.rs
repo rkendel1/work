@@ -47,19 +47,25 @@ async fn deployment_contract_self_validation_endpoint_reports_green() {
     let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
 
     assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(body.get("runtime").and_then(|v| v.as_str()), Some("healthy"));
+    assert_eq!(body.get("runtime").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(body.get("ownership").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(
-        body.get("contracts").and_then(|v| v.as_str()),
-        Some("passing")
+        body.get("projection_boundaries")
+            .and_then(|v| v.as_bool()),
+        Some(true)
     );
     assert_eq!(
-        body.get("ownership").and_then(|v| v.as_str()),
-        Some("passing")
+        body.get("knowledge_runtime").and_then(|v| v.as_bool()),
+        Some(true)
     );
-    assert_eq!(body.get("routes").and_then(|v| v.as_str()), Some("passing"));
     assert_eq!(
-        body.get("capabilities").and_then(|v| v.as_str()),
-        Some("passing")
+        body.get("communication_runtime").and_then(|v| v.as_bool()),
+        Some(true)
     );
-    assert_eq!(body.get("violations").and_then(|v| v.as_array()).map(Vec::len), Some(0));
+    assert_eq!(
+        body.get("violations")
+            .and_then(|v| v.as_array())
+            .map(Vec::len),
+        Some(0)
+    );
 }

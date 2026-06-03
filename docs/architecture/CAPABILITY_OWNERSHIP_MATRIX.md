@@ -16,20 +16,37 @@ Generated from `services/rust-api/src/contracts/capability_matrix.rs`.
 - Secrets
 - Simulation Runtime
 - Communication Runtime
+- Message Creation
+- Recipient Resolution
+- Notification Generation
+- Delivery Tracking
+- Communication Policies
+- Escalation Rules
+- OperationalKnowledgeRuntime
 - Notification Dispatch
 - Process Graph Generation
 - Behavior Analytics
 - Operational Artifact Generation
 - Domain Events
+- Emit Domain Events
+- Publish Projection Events
 
 ## Convex Owns
 
 - Read Models
 - Query Surfaces
 - Dashboard Materializations
-- Tenant Metadata
 - Historical Analytics
 - Projection Storage
+- Store Projections
+- Serve Queries
+- OperationalKnowledgeProjection
+- UserProfiles
+- Memberships
+- Preferences
+- Message Views
+- Inbox Queries
+- Notification Read Models
 
 ## Next.js Owns
 
@@ -37,6 +54,7 @@ Generated from `services/rust-api/src/contracts/capability_matrix.rs`.
 - Onboarding UX
 - Admin Screens
 - Visualization
+- OperationalKnowledgeVisualization
 - Simulation Console
 - Operational Explorer
 - Artifact Viewer
@@ -47,4 +65,8 @@ Generated from `services/rust-api/src/contracts/capability_matrix.rs`.
 - Tenant Context
 - Subdomain Resolution
 - Feature Flags
+- TenantDefinitions
+- TenantConfiguration
+- CrosswalkConfiguration
+- OrgStructure
 
