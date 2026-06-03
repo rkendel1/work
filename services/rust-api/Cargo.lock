@@ -1042,6 +1042,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "chrono",
+ "log",
  "rand 0.9.4",
  "reqwest",
  "serde",
