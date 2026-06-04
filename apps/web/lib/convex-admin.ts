@@ -1,6 +1,9 @@
 type ConvexMutationArgs = Record<string, unknown>;
 type ConvexQueryArgs = Record<string, unknown>;
 type ConvexAuthScheme = "Convex" | "Bearer";
+type ConvexApiEnvelope<T> =
+  | { status: "success"; value: T }
+  | { status: "error"; errorMessage?: string };
 
 const CONVEX_ADMIN_KEY_NAMES = [
   "CONVEX_ADMIN_KEY",
@@ -132,9 +135,25 @@ async function runConvexAdminRequest<T>(
 }
 
 export async function runConvexAdminMutation(path: string, args: ConvexMutationArgs) {
-  await runConvexAdminRequest("mutation", path, args, async () => undefined);
+  await runConvexAdminRequest("mutation", path, args, async (response) => {
+    const payload = (await response.json()) as ConvexApiEnvelope<unknown>;
+    if (payload && typeof payload === "object" && "status" in payload) {
+      if (payload.status === "error") {
+        throw new Error(payload.errorMessage ?? "Unknown Convex mutation error");
+      }
+    }
+  });
 }
 
 export async function runConvexAdminQuery<T>(path: string, args: ConvexQueryArgs) {
-  return await runConvexAdminRequest("query", path, args, async (response) => (await response.json()) as T);
+  return await runConvexAdminRequest("query", path, args, async (response) => {
+    const payload = (await response.json()) as ConvexApiEnvelope<T> | T;
+    if (payload && typeof payload === "object" && "status" in payload) {
+      if (payload.status === "error") {
+        throw new Error(payload.errorMessage ?? "Unknown Convex query error");
+      }
+      return payload.value;
+    }
+    return payload;
+  });
 }
