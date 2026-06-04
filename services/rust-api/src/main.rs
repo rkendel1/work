@@ -2336,6 +2336,112 @@ struct ConvexWorkOutcomeArgs {
     completed_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConvexAuthScheme {
+    Convex,
+    Bearer,
+}
+
+impl ConvexAuthScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Convex => "Convex",
+            _ => "Bearer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConvexAuth {
+    scheme: ConvexAuthScheme,
+    token: String,
+    explicit_scheme: bool,
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn compact_whitespace(value: &str) -> String {
+    value.chars().filter(|character| !character.is_whitespace()).collect()
+}
+
+fn parse_convex_authorization(raw: &str) -> Option<ConvexAuth> {
+    let mut normalized = raw.trim().trim_matches(['"', '\'']).trim();
+    if let Some(stripped) = strip_prefix_ignore_ascii_case(normalized, "export ") {
+        normalized = stripped.trim();
+    }
+    for prefix in [
+        "CONVEX_ADMIN_KEY=",
+        "CONVEX_DEPLOY_KEY=",
+        "CONVEX_DEPLOYMENT_KEY=",
+        "CONVEX_ACCESS_TOKEN=",
+    ] {
+        if let Some(stripped) = strip_prefix_ignore_ascii_case(normalized, prefix) {
+            normalized = stripped.trim();
+            break;
+        }
+    }
+    if let Some(stripped) = strip_prefix_ignore_ascii_case(normalized, "authorization:") {
+        normalized = stripped.trim();
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(stripped) = strip_prefix_ignore_ascii_case(normalized, "convex ") {
+        let token = compact_whitespace(stripped);
+        return (!token.is_empty()).then_some(ConvexAuth {
+            scheme: ConvexAuthScheme::Convex,
+            token,
+            explicit_scheme: true,
+        });
+    }
+    if let Some(stripped) = strip_prefix_ignore_ascii_case(normalized, "bearer ") {
+        let token = compact_whitespace(stripped);
+        return (!token.is_empty()).then_some(ConvexAuth {
+            scheme: ConvexAuthScheme::Bearer,
+            token,
+            explicit_scheme: true,
+        });
+    }
+
+    let token = compact_whitespace(normalized);
+    (!token.is_empty()).then_some(ConvexAuth {
+        scheme: ConvexAuthScheme::Convex,
+        token,
+        explicit_scheme: false,
+    })
+}
+
+fn is_jwt_like_token(token: &str) -> bool {
+    let mut sections = token.split('.');
+    match (sections.next(), sections.next(), sections.next(), sections.next()) {
+        (Some(first), Some(second), Some(third), None) => {
+            !first.is_empty() && !second.is_empty() && !third.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn schemes_for_convex_auth(auth: &ConvexAuth) -> Vec<ConvexAuthScheme> {
+    if !auth.explicit_scheme {
+        if is_jwt_like_token(&auth.token) {
+            return vec![ConvexAuthScheme::Bearer, ConvexAuthScheme::Convex];
+        }
+        return vec![ConvexAuthScheme::Convex];
+    }
+    if matches!(auth.scheme, ConvexAuthScheme::Convex) {
+        vec![ConvexAuthScheme::Convex, ConvexAuthScheme::Bearer]
+    } else {
+        vec![ConvexAuthScheme::Bearer, ConvexAuthScheme::Convex]
+    }
+}
+
 async fn send_convex_mutation<T: Serialize>(
     client: &Client,
     convex_config: &ConvexConfig,
@@ -2349,31 +2455,44 @@ async fn send_convex_mutation<T: Serialize>(
     let Some(admin_key) = convex_config.admin_key.as_deref() else {
         return Ok(());
     };
+    let Some(auth) = parse_convex_authorization(admin_key) else {
+        return Err("convex admin key is invalid after normalization".to_string());
+    };
 
     let endpoint = format!("{}/api/mutation", deployment_url.trim_end_matches('/'));
     let payload = ConvexMutationRequest {
         path: function_path.to_string(),
         args,
     };
+    let mut errors = Vec::new();
 
-    let response = client
-        .post(endpoint)
-        .header("Authorization", format!("Convex {admin_key}"))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("request failed: {error}"))?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response
-            .text()
+    for scheme in schemes_for_convex_auth(&auth) {
+        let response = match client
+            .post(&endpoint)
+            .header(
+                "Authorization",
+                format!("{} {}", scheme.as_str(), auth.token),
+            )
+            .json(&payload)
+            .send()
             .await
-            .unwrap_or_else(|_| "unable to read response body".to_string());
-        Err(format!("convex returned {status}: {body}"))
+        {
+            Ok(response) => response,
+            Err(error) => {
+                errors.push(format!("{} request failed: {error}", scheme.as_str()));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+        errors.push(format!("{} {status}: {body}", scheme.as_str()));
     }
+
+    Err(format!("convex mutation failed: {}", errors.join(" | ")))
 }
 
 async fn forward_inbox_to_convex(
@@ -5123,6 +5242,36 @@ mod tests {
             deployment_url: Some("https://example.convex.cloud".to_string()),
             admin_key: Some("admin-key".to_string()),
         }))
+    }
+
+    #[actix_web::test]
+    async fn parse_convex_authorization_supports_prefixed_env_and_header_values() {
+        let parsed = parse_convex_authorization("  CONVEX_ADMIN_KEY=Authorization: Convex a.b.c  ")
+            .expect("expected normalized auth");
+        assert_eq!(parsed.token, "a.b.c");
+        assert_eq!(parsed.scheme, ConvexAuthScheme::Convex);
+        assert!(parsed.explicit_scheme);
+    }
+
+    #[actix_web::test]
+    async fn parse_convex_authorization_accepts_raw_token_with_implicit_convex_scheme() {
+        let parsed = parse_convex_authorization("  raw-admin-token  ").expect("expected parsed auth");
+        assert_eq!(parsed.token, "raw-admin-token");
+        assert_eq!(parsed.scheme, ConvexAuthScheme::Convex);
+        assert!(!parsed.explicit_scheme);
+    }
+
+    #[actix_web::test]
+    async fn schemes_for_convex_auth_prefers_bearer_for_jwt_like_tokens() {
+        let auth = ConvexAuth {
+            scheme: ConvexAuthScheme::Convex,
+            token: "header.payload.signature".to_string(),
+            explicit_scheme: false,
+        };
+        assert_eq!(
+            schemes_for_convex_auth(&auth),
+            vec![ConvexAuthScheme::Bearer, ConvexAuthScheme::Convex]
+        );
     }
 
     #[actix_web::test]

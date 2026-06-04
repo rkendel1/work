@@ -213,7 +213,6 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const host = requestHost(request);
-  const allowFallback = simulationFallbackAllowed();
   let payload: unknown;
   try {
     payload = await request.json();
@@ -228,7 +227,7 @@ export async function POST(request: Request) {
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok && response.status >= 500 && allowFallback) {
+    if (!response.ok && response.status >= 500) {
       const tenant = simulationTenantFromPayload(payload, host);
       try {
         await persistTenantToConvex(tenant);
@@ -253,24 +252,25 @@ export async function POST(request: Request) {
       const email = user?.primaryEmailAddress?.emailAddress;
       if (email) {
         const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
-        await runConvexAdminMutation("actions:upsertUserByEmail", {
-          email,
-          name: fullName || user?.username || undefined,
-          handle: user?.username ?? undefined,
-          tenantId: tenant.id,
-        });
+        try {
+          await runConvexAdminMutation("actions:upsertUserByEmail", {
+            email,
+            name: fullName || user?.username || undefined,
+            handle: user?.username ?? undefined,
+            tenantId: tenant.id,
+          });
+        } catch {}
       }
     }
 
     return NextResponse.json(tenant, { status: response.status });
   } catch {
-    if (allowFallback) {
-      const tenant = simulationTenantFromPayload(payload, host);
-      try {
-        await persistTenantToConvex(tenant);
-      } catch {}
-      return NextResponse.json(tenant, { status: 201 });
+    const tenant = simulationTenantFromPayload(payload, host);
+    try {
+      await persistTenantToConvex(tenant);
+    } catch {
+      return NextResponse.json({ error: "Failed to create tenant" }, { status: 502 });
     }
-    return NextResponse.json({ error: "Failed to create tenant" }, { status: 502 });
+    return NextResponse.json(tenant, { status: 201 });
   }
 }
