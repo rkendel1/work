@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { SAAS_ROOT_DOMAIN } from "@/lib/runtime-config";
 import { resolveTenantId } from "@/lib/tenant-context";
-import { isRootHost, tenantDomainFromSlug } from "@/lib/tenant-routing";
 import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type SignalPayload = {
@@ -20,25 +18,6 @@ type SignalPayload = {
   tenantId?: string;
 };
 
-function normalizeHost(value: string): string {
-  return value.toLowerCase().trim().split(":")[0];
-}
-
-type ForwardTenant = "default" | "northstar-facilities" | "harbor-clinic-ops";
-
-function forwardingTenant(tenantId: string | undefined): ForwardTenant | null {
-  if (tenantId === "default") {
-    return "default";
-  }
-  if (tenantId === "northstar-facilities") {
-    return "northstar-facilities";
-  }
-  if (tenantId === "harbor-clinic-ops") {
-    return "harbor-clinic-ops";
-  }
-  return null;
-}
-
 export async function POST(request: Request) {
   let payload: SignalPayload;
 
@@ -49,33 +28,6 @@ export async function POST(request: Request) {
   }
 
   const sourceType = payload.sourceType?.trim() || "api";
-  const requestHost = normalizeHost(new URL(request.url).host);
-  const requestedTenantId = payload.tenantId?.trim() || undefined;
-  const targetTenant = forwardingTenant(requestedTenantId);
-  const targetDomain =
-    targetTenant && isRootHost(requestHost) && requestHost !== "localhost" && !requestHost.endsWith(".localhost")
-      ? normalizeHost(tenantDomainFromSlug(targetTenant, SAAS_ROOT_DOMAIN))
-      : null;
-
-  if (targetDomain && targetDomain !== requestHost) {
-    try {
-      const forwardResponse = await fetch(`https://${targetDomain}/api/signals`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const body = await forwardResponse.text();
-      return new NextResponse(body, {
-        status: forwardResponse.status,
-        headers: {
-          "Content-Type": forwardResponse.headers.get("Content-Type") ?? "application/json",
-        },
-      });
-    } catch {
-      return NextResponse.json({ error: "Failed to forward signal to tenant domain" }, { status: 502 });
-    }
-  }
-
   const tenantId = payload.tenantId?.trim() || resolveTenantId(request) || "default";
   const normalizedContent = payload.normalizedContent?.trim();
 

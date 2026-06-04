@@ -131,6 +131,9 @@ export default async function Home() {
           <Link href="/simulate" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             Inject Scenario
           </Link>
+          <Link href="/demo-admin" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
+            Demo Admin
+          </Link>
           <Link href="/" className="rounded border border-zinc-300 px-4 py-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200">
             View Live Feed
           </Link>

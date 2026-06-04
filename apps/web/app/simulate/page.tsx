@@ -1,8 +1,16 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
-type Tenant = { id: string; display_name: string; domain?: string };
+type Tenant = {
+  id: string;
+  slug?: string;
+  display_name: string;
+  domain?: string;
+  vertical?: string;
+  industry?: string;
+};
 type InjectionMode = "single" | "burst" | "scenario";
 type InjectionResult = {
   content: string;
@@ -10,7 +18,7 @@ type InjectionResult = {
   endpoint: string;
 };
 
-const SCENARIO_LIBRARY: Record<string, string[]> = {
+const DEFAULT_SCENARIO_LIBRARY: Record<string, string[]> = {
   "Facilities outage day": [
     "HVAC failure email from Building 2",
     "Water leak escalation from tenant in Suite 401",
@@ -32,6 +40,47 @@ const SCENARIO_LIBRARY: Record<string, string[]> = {
     "Payment reconciliation queue overflow message",
   ],
 };
+
+const VERTICAL_SCENARIO_LIBRARY: Record<
+  string,
+  { payload: string; scenarios: Record<string, string[]> }
+> = {
+  healthcare: {
+    payload: "Critical lab result routing delay for outpatient clinic",
+    scenarios: {
+      "Clinic incident surge": [
+        "Lab callback queue warning from hematology",
+        "Patient intake backlog notification from triage bot",
+        "Pharmacy reconciliation mismatch alert",
+      ],
+      "Care coordination outage": [
+        "Referral handoff timeout for cardiology follow-up",
+        "Authorization exception from payer integration",
+        "Escalation note from nurse station",
+      ],
+    },
+  },
+  logistics: {
+    payload: "Dispatch exception for regional freight lane",
+    scenarios: {
+      "Route disruption event": [
+        "Carrier late arrival escalation from dock scheduler",
+        "Temperature excursion alert for cold-chain shipment",
+        "Customs hold update from border broker feed",
+      ],
+      "Warehouse throughput spike": [
+        "Pick-pack queue saturation warning",
+        "Loading bay staffing shortage notification",
+        "Backorder burst from marketplace integration",
+      ],
+    },
+  },
+};
+
+function scenarioProfileForTenant(tenant: Tenant | undefined) {
+  const verticalKey = (tenant?.vertical ?? "").toLowerCase().trim();
+  return (verticalKey ? VERTICAL_SCENARIO_LIBRARY[verticalKey] : undefined) ?? null;
+}
 
 const BURST_VARIATIONS = [
   "critical escalation",
@@ -63,9 +112,9 @@ async function postSignal(tenantId: string, content: string) {
 
 export default function SimulatePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
-  const [tenantId, setTenantId] = useState("default");
+  const [tenantId, setTenantId] = useState("");
   const [mode, setMode] = useState<InjectionMode>("single");
-  const [payload, setPayload] = useState("HVAC failure email");
+  const [payload, setPayload] = useState("HVAC failure email from Building 2");
   const [burstSize, setBurstSize] = useState(10);
   const [scenario, setScenario] = useState("Facilities outage day");
   const [status, setStatus] = useState<string | null>(null);
@@ -83,13 +132,42 @@ export default function SimulatePage() {
       .then((loaded) => {
         setTenants(loaded);
         if (loaded.length > 0) {
-          setTenantId(loaded[0].id);
+          const firstTenant = loaded[0];
+          setTenantId(firstTenant.id);
+          const profile = scenarioProfileForTenant(firstTenant);
+          setPayload(profile?.payload ?? "HVAC failure email from Building 2");
+          const firstScenario = Object.keys(profile?.scenarios ?? DEFAULT_SCENARIO_LIBRARY)[0];
+          if (firstScenario) {
+            setScenario(firstScenario);
+          }
+        } else {
+          setTenantId("");
+          setStatus("No simulation tenants found. Add tenants in the database to run live demo scenarios.");
         }
       })
       .catch(() => {
         setTenants([]);
+        setStatus("Unable to load tenants from the database.");
       });
   }, []);
+
+  const selectedTenant = useMemo(
+    () => tenants.find((tenant) => tenant.id === tenantId),
+    [tenantId, tenants],
+  );
+
+  const scenarioLibrary = scenarioProfileForTenant(selectedTenant)?.scenarios ?? DEFAULT_SCENARIO_LIBRARY;
+
+  function handleTenantChange(nextTenantId: string) {
+    setTenantId(nextTenantId);
+    const nextTenant = tenants.find((tenant) => tenant.id === nextTenantId);
+    const profile = scenarioProfileForTenant(nextTenant);
+    setPayload(profile?.payload ?? "HVAC failure email from Building 2");
+    const firstScenario = Object.keys(profile?.scenarios ?? DEFAULT_SCENARIO_LIBRARY)[0];
+    if (firstScenario) {
+      setScenario(firstScenario);
+    }
+  }
 
   const payloads = useMemo(() => {
     if (mode === "single") {
@@ -101,12 +179,11 @@ export default function SimulatePage() {
         (_, index) => `${payload} • ${BURST_VARIATIONS[index % BURST_VARIATIONS.length]} #${index + 1}`,
       );
     }
-    return SCENARIO_LIBRARY[scenario] ?? [];
-  }, [burstSize, mode, payload, scenario]);
+    return scenarioLibrary[scenario] ?? [];
+  }, [burstSize, mode, payload, scenario, scenarioLibrary]);
 
   async function runInjection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
     const targetDomain = selectedTenant?.domain ?? window.location.host;
     const protocol = targetDomain === "localhost" || targetDomain.endsWith(".localhost") ? "http:" : "https:";
     const targetEndpoint = `${protocol}//${targetDomain}/api/signals`;
@@ -137,6 +214,13 @@ export default function SimulatePage() {
         <p className="text-zinc-600 dark:text-zinc-400">
           Inject operational scenarios into the live stream and run the full ingest-to-execution pipeline.
         </p>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          Need demo tenant setup?{" "}
+          <Link href="/demo-admin" className="underline">
+            Open Demo Admin Tool
+          </Link>
+          .
+        </p>
       </section>
 
       <form onSubmit={runInjection} className="grid gap-4 rounded-lg border bg-white p-5 dark:bg-zinc-800 dark:border-zinc-700">
@@ -145,16 +229,23 @@ export default function SimulatePage() {
           <select
             className="rounded border px-3 py-2 dark:bg-zinc-900 dark:border-zinc-600"
             value={tenantId}
-            onChange={(event) => setTenantId(event.target.value)}
+            onChange={(event) => handleTenantChange(event.target.value)}
           >
             {tenants.map((tenant) => (
               <option key={tenant.id} value={tenant.id}>
                 {tenant.display_name}
               </option>
             ))}
-            {tenants.length === 0 ? <option value="default">Default Tenant</option> : null}
+            {tenants.length === 0 ? <option value="">No tenants available</option> : null}
           </select>
         </label>
+
+        {selectedTenant ? (
+          <p className="text-xs text-zinc-600 dark:text-zinc-400">
+            {selectedTenant.vertical ?? "General"} • {selectedTenant.industry ?? "General"} •{" "}
+            {selectedTenant.domain ?? "domain unavailable"}
+          </p>
+        ) : null}
 
         <label className="grid gap-1 text-sm">
           Mode
@@ -203,7 +294,7 @@ export default function SimulatePage() {
               value={scenario}
               onChange={(event) => setScenario(event.target.value)}
             >
-              {Object.keys(SCENARIO_LIBRARY).map((scenarioKey) => (
+              {Object.keys(scenarioLibrary).map((scenarioKey) => (
                 <option key={scenarioKey} value={scenarioKey}>
                   {scenarioKey}
                 </option>
@@ -214,7 +305,7 @@ export default function SimulatePage() {
 
         <button
           type="submit"
-          disabled={running}
+          disabled={running || !tenantId || payloads.length === 0}
           className="rounded bg-zinc-900 px-4 py-2 font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
         >
           {running ? "Running..." : "Run scenario injection"}
@@ -222,6 +313,15 @@ export default function SimulatePage() {
       </form>
 
       {status ? <p className="text-sm text-zinc-700 dark:text-zinc-300">{status}</p> : null}
+      {tenants.length === 0 ? (
+        <p className="text-sm text-zinc-700 dark:text-zinc-300">
+          No tenants found. Create and seed one in{" "}
+          <Link href="/demo-admin" className="underline">
+            Demo Admin Tool
+          </Link>
+          .
+        </p>
+      ) : null}
       {results.length > 0 ? (
         <section className="rounded-lg border bg-white p-5 dark:border-zinc-700 dark:bg-zinc-800">
           <h2 className="text-lg font-semibold">Signals sent</h2>

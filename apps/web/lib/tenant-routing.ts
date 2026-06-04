@@ -10,11 +10,33 @@ function normalizeHost(host: string | null | undefined): string {
 }
 
 export function normalizeTenantSlug(slug: string | null | undefined): string {
-  return (slug ?? "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const input = (slug ?? "").toLowerCase().trim();
+  let normalized = "";
+  let previousWasSeparator = false;
+
+  for (const character of input) {
+    const code = character.charCodeAt(0);
+    const isAlphaNumeric =
+      (code >= 97 && code <= 122) || // a-z
+      (code >= 48 && code <= 57); // 0-9
+
+    if (isAlphaNumeric) {
+      normalized += character;
+      previousWasSeparator = false;
+      continue;
+    }
+
+    if (!previousWasSeparator && normalized.length > 0) {
+      normalized += "-";
+      previousWasSeparator = true;
+    }
+  }
+
+  if (normalized.endsWith("-")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
 }
 
 export function isRootHost(host: string | null | undefined): boolean {
