@@ -329,6 +329,7 @@ export default defineSchema({
         name: v.string(),
         description: v.string(),
         classificationTypes: v.array(v.string()),
+        assignedOrgUnitName: v.optional(v.string()),
       }),
     ),
   }).index("by_vertical_industry", ["vertical", "industry"]),
