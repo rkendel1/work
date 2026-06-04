@@ -1,5 +1,6 @@
 type ConvexMutationArgs = Record<string, unknown>;
 type ConvexQueryArgs = Record<string, unknown>;
+type ConvexAuthScheme = "Convex" | "Bearer";
 
 const CONVEX_ADMIN_KEY_NAMES = [
   "CONVEX_ADMIN_KEY",
@@ -9,8 +10,9 @@ const CONVEX_ADMIN_KEY_NAMES = [
 ] as const;
 
 type ConvexAuth = {
-  scheme: "Convex" | "Bearer";
+  scheme: ConvexAuthScheme;
   token: string;
+  explicitScheme: boolean;
 };
 
 function parseConvexAuthorization(rawValue: string): ConvexAuth | null {
@@ -29,7 +31,7 @@ function parseConvexAuthorization(rawValue: string): ConvexAuth | null {
   if (withScheme) {
     const scheme = withScheme[1].toLowerCase() === "bearer" ? "Bearer" : "Convex";
     const token = withScheme[2].trim().replace(/\s+/g, "");
-    return token ? { scheme, token } : null;
+    return token ? { scheme, token, explicitScheme: true } : null;
   }
 
   const token = normalized.replace(/\s+/g, "");
@@ -37,8 +39,7 @@ function parseConvexAuthorization(rawValue: string): ConvexAuth | null {
     return null;
   }
 
-  const inferredScheme = token.includes(".") ? "Bearer" : "Convex";
-  return { scheme: inferredScheme, token };
+  return { scheme: "Convex", token, explicitScheme: false };
 }
 
 function convexAdminConfig() {
@@ -61,21 +62,35 @@ export async function runConvexAdminMutation(path: string, args: ConvexMutationA
     throw new Error("Convex admin credentials are not configured");
   }
 
-  const response = await fetch(`${config.deploymentUrl}/api/mutation`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `${config.auth.scheme} ${config.auth.token}`,
-    },
-    body: JSON.stringify({ path, args }),
-  });
+  const schemes: ConvexAuthScheme[] = config.auth.explicitScheme
+    ? [config.auth.scheme]
+    : [config.auth.scheme, "Bearer"];
+  let lastStatus = 0;
+  let lastBody = "";
 
-  if (response.ok) {
-    return;
+  for (const scheme of schemes) {
+    const response = await fetch(`${config.deploymentUrl}/api/mutation`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `${scheme} ${config.auth.token}`,
+      },
+      body: JSON.stringify({ path, args }),
+    });
+
+    if (response.ok) {
+      return;
+    }
+
+    const body = await response.text();
+    lastStatus = response.status;
+    lastBody = body;
+    if (response.status !== 401 || config.auth.explicitScheme) {
+      break;
+    }
   }
 
-  const body = await response.text();
-  throw new Error(`Convex mutation ${path} failed (${response.status}): ${body}`);
+  throw new Error(`Convex mutation ${path} failed (${lastStatus}): ${lastBody}`);
 }
 
 export async function runConvexAdminQuery<T>(path: string, args: ConvexQueryArgs) {
@@ -84,19 +99,33 @@ export async function runConvexAdminQuery<T>(path: string, args: ConvexQueryArgs
     throw new Error("Convex admin credentials are not configured");
   }
 
-  const response = await fetch(`${config.deploymentUrl}/api/query`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `${config.auth.scheme} ${config.auth.token}`,
-    },
-    body: JSON.stringify({ path, args }),
-  });
+  const schemes: ConvexAuthScheme[] = config.auth.explicitScheme
+    ? [config.auth.scheme]
+    : [config.auth.scheme, "Bearer"];
+  let lastStatus = 0;
+  let lastBody = "";
 
-  if (response.ok) {
-    return (await response.json()) as T;
+  for (const scheme of schemes) {
+    const response = await fetch(`${config.deploymentUrl}/api/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `${scheme} ${config.auth.token}`,
+      },
+      body: JSON.stringify({ path, args }),
+    });
+
+    if (response.ok) {
+      return (await response.json()) as T;
+    }
+
+    const body = await response.text();
+    lastStatus = response.status;
+    lastBody = body;
+    if (response.status !== 401 || config.auth.explicitScheme) {
+      break;
+    }
   }
 
-  const body = await response.text();
-  throw new Error(`Convex query ${path} failed (${response.status}): ${body}`);
+  throw new Error(`Convex query ${path} failed (${lastStatus}): ${lastBody}`);
 }
