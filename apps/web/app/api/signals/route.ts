@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { SAAS_ROOT_DOMAIN } from "@/lib/runtime-config";
 import { resolveTenantId } from "@/lib/tenant-context";
-import { isRootHost, tenantDomainFromSlug } from "@/lib/tenant-routing";
+import { isRootHost, normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type SignalPayload = {
@@ -24,19 +23,11 @@ function normalizeHost(value: string): string {
   return value.toLowerCase().trim().split(":")[0];
 }
 
-type ForwardTenant = "default" | "northstar-facilities" | "harbor-clinic-ops";
-
-function forwardingTenant(tenantId: string | undefined): ForwardTenant | null {
-  if (tenantId === "default") {
-    return "default";
+function forwardingTenant(tenantId: string | undefined): string | null {
+  if (!tenantId) {
+    return null;
   }
-  if (tenantId === "northstar-facilities") {
-    return "northstar-facilities";
-  }
-  if (tenantId === "harbor-clinic-ops") {
-    return "harbor-clinic-ops";
-  }
-  return null;
+  return normalizeTenantSlug(tenantId) || null;
 }
 
 export async function POST(request: Request) {
@@ -52,14 +43,18 @@ export async function POST(request: Request) {
   const requestHost = normalizeHost(new URL(request.url).host);
   const requestedTenantId = payload.tenantId?.trim() || undefined;
   const targetTenant = forwardingTenant(requestedTenantId);
-  const targetDomain =
-    targetTenant && isRootHost(requestHost) && requestHost !== "localhost" && !requestHost.endsWith(".localhost")
-      ? normalizeHost(tenantDomainFromSlug(targetTenant, SAAS_ROOT_DOMAIN))
-      : null;
+  const targetDomain = targetTenant && isRootHost(requestHost) ? normalizeHost(tenantDomainFromSlug(targetTenant, requestHost)) : null;
 
   if (targetDomain && targetDomain !== requestHost) {
+    const protocol =
+      requestHost === "localhost" ||
+      requestHost.endsWith(".localhost") ||
+      targetDomain === "localhost" ||
+      targetDomain.endsWith(".localhost")
+        ? "http"
+        : "https";
     try {
-      const forwardResponse = await fetch(`https://${targetDomain}/api/signals`, {
+      const forwardResponse = await fetch(`${protocol}://${targetDomain}/api/signals`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
