@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 type Tenant = {
@@ -62,12 +62,15 @@ export default function DemoAdminPage() {
   const [editIndustry, setEditIndustry] = useState("");
   const [seedEmail, setSeedEmail] = useState("");
 
-  const selectedTenant = useMemo(
-    () => catalog.tenants.find((tenant) => tenant.id === selectedTenantId) ?? null,
-    [catalog.tenants, selectedTenantId],
-  );
+  const hydrateTenantEditor = useCallback((tenant: Tenant) => {
+    setEditDisplayName(tenant.displayName ?? tenant.name);
+    setEditDomain(tenant.domain ?? "");
+    setEditVertical(tenant.vertical ?? "");
+    setEditIndustry(tenant.industry ?? "");
+    setSeedEmail(`demo.operator+${tenant.id}@canonflo.local`);
+  }, []);
 
-  async function loadCatalog() {
+  const loadCatalog = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -85,29 +88,26 @@ export default function DemoAdminPage() {
 
       if (nextCatalog.tenants.length > 0) {
         const firstTenant = nextCatalog.tenants[0];
-        setSelectedTenantId((previous) => previous || firstTenant.id);
+        setSelectedTenantId((previous) => {
+          const nextId = previous || firstTenant.id;
+          const tenant = nextCatalog.tenants.find((entry) => entry.id === nextId) ?? firstTenant;
+          hydrateTenantEditor(tenant);
+          return tenant.id;
+        });
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load catalog");
     } finally {
       setLoading(false);
     }
-  }
+  }, [hydrateTenantEditor]);
 
   useEffect(() => {
-    void loadCatalog();
-  }, []);
-
-  useEffect(() => {
-    if (!selectedTenant) {
-      return;
-    }
-    setEditDisplayName(selectedTenant.displayName ?? selectedTenant.name);
-    setEditDomain(selectedTenant.domain ?? "");
-    setEditVertical(selectedTenant.vertical ?? "");
-    setEditIndustry(selectedTenant.industry ?? "");
-    setSeedEmail(`demo.operator+${selectedTenant.id}@canonflo.local`);
-  }, [selectedTenant]);
+    const timer = setTimeout(() => {
+      void loadCatalog();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [loadCatalog]);
 
   async function submitCreateTenant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -328,7 +328,14 @@ export default function DemoAdminPage() {
           <div className="grid gap-4">
             <select
               value={selectedTenantId}
-              onChange={(event) => setSelectedTenantId(event.target.value)}
+              onChange={(event) => {
+                const nextId = event.target.value;
+                setSelectedTenantId(nextId);
+                const tenant = catalog.tenants.find((entry) => entry.id === nextId);
+                if (tenant) {
+                  hydrateTenantEditor(tenant);
+                }
+              }}
               className="rounded border px-3 py-2 dark:border-zinc-600 dark:bg-zinc-900"
             >
               {catalog.tenants.map((tenant) => (
