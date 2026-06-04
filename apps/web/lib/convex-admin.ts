@@ -11,6 +11,12 @@ const CONVEX_ADMIN_KEY_NAMES = [
   "CONVEX_DEPLOYMENT_KEY",
   "CONVEX_ACCESS_TOKEN",
 ] as const;
+const CONVEX_URL_NAMES = [
+  "CONVEX_ADMIN_URL",
+  "NEXT_PUBLIC_CONVEX_URL",
+  "CONVEX_URL",
+  "CONVEX_DEPLOYMENT_URL",
+] as const;
 
 type ConvexAuth = {
   scheme: ConvexAuthScheme;
@@ -56,9 +62,10 @@ function isJwtLikeToken(token: string) {
 }
 
 function convexAdminConfig() {
-  const deploymentUrl = (process.env.CONVEX_URL ?? process.env.NEXT_PUBLIC_CONVEX_URL ?? "")
-    .trim()
-    .replace(/\/+$/, "");
+  const deploymentUrls = CONVEX_URL_NAMES.map((name) => process.env[name] ?? "")
+    .map((value) => value.trim().replace(/\/+$/, ""))
+    .filter((value) => value.length > 0)
+    .filter((value, index, all) => all.indexOf(value) === index);
   const candidates: ConvexAuthCandidate[] = [];
   for (const name of CONVEX_ADMIN_KEY_NAMES) {
     const rawValue = process.env[name];
@@ -82,10 +89,10 @@ function convexAdminConfig() {
     return true;
   });
 
-  if (!deploymentUrl || uniqueCandidates.length === 0) {
+  if (deploymentUrls.length === 0 || uniqueCandidates.length === 0) {
     return null;
   }
-  return { deploymentUrl, candidates: uniqueCandidates };
+  return { deploymentUrls, candidates: uniqueCandidates };
 }
 
 function schemesForAuth(auth: ConvexAuth): ConvexAuthScheme[] {
@@ -107,25 +114,31 @@ async function runConvexAdminRequest<T>(
   }
 
   const errors: string[] = [];
-  for (const candidate of config.candidates) {
-    for (const scheme of schemesForAuth(candidate.auth)) {
-      const response = await fetch(`${config.deploymentUrl}/api/${endpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `${scheme} ${candidate.auth.token}`,
-        },
-        body: JSON.stringify({ path, args }),
-      });
+  for (const deploymentUrl of config.deploymentUrls) {
+    for (const candidate of config.candidates) {
+      for (const scheme of schemesForAuth(candidate.auth)) {
+        const response = await fetch(`${deploymentUrl}/api/${endpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `${scheme} ${candidate.auth.token}`,
+          },
+          body: JSON.stringify({ path, args }),
+        });
 
-      if (response.ok) {
-        return await parse(response);
-      }
+        if (response.ok) {
+          try {
+            return await parse(response);
+          } catch (error) {
+            errors.push(
+              `${deploymentUrl}:${candidate.name}:${scheme}:ok:${error instanceof Error ? error.message : "parse_failed"}`,
+            );
+            continue;
+          }
+        }
 
-      const body = await response.text();
-      errors.push(`${candidate.name}:${scheme}:${response.status}:${body}`);
-      if (response.status !== 401) {
-        break;
+        const body = await response.text();
+        errors.push(`${deploymentUrl}:${candidate.name}:${scheme}:${response.status}:${body}`);
       }
     }
   }
