@@ -1,7 +1,10 @@
+#[allow(dead_code)]
 #[path = "src/contracts/capability_matrix.rs"]
 mod capability_matrix;
+#[allow(dead_code)]
 #[path = "src/contracts/projection_boundaries.rs"]
 mod projection_boundaries;
+#[allow(dead_code)]
 #[path = "src/knowledge/mod.rs"]
 mod knowledge;
 
