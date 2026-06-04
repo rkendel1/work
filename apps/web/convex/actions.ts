@@ -222,6 +222,35 @@ export const createTenant = mutationGeneric({
     createdAt: v.number(),
   },
   handler: async (ctx, args) => {
+    const normalizedVertical = args.vertical?.trim() || undefined;
+    const normalizedIndustry = args.industry?.trim() || undefined;
+
+    const ensureTenantTaxonomy = async () => {
+      if (normalizedVertical) {
+        const existingVertical = await ctx.db
+          .query("verticals")
+          .withIndex("by_name", (query) => query.eq("name", normalizedVertical))
+          .first();
+        if (!existingVertical) {
+          await ctx.db.insert("verticals", { name: normalizedVertical });
+        }
+      }
+
+      if (normalizedVertical && normalizedIndustry) {
+        const existingIndustry = await ctx.db
+          .query("industries")
+          .withIndex("by_vertical_name", (query) => query.eq("vertical", normalizedVertical))
+          .filter((query) => query.eq(query.field("name"), normalizedIndustry))
+          .first();
+        if (!existingIndustry) {
+          await ctx.db.insert("industries", {
+            vertical: normalizedVertical,
+            name: normalizedIndustry,
+          });
+        }
+      }
+    };
+
     const upsertCrosswalk = async (entry: {
       tenantId: string;
       vertical: string;
@@ -250,10 +279,26 @@ export const createTenant = mutationGeneric({
       .withIndex("by_slug", (query) => query.eq("slug", args.slug))
       .unique();
     if (existing) {
+      await ctx.db.patch(existing._id, {
+        id: args.id,
+        name: args.name,
+        slug: args.slug,
+        domain: args.domain,
+        displayName: args.displayName,
+        vertical: normalizedVertical,
+        industry: normalizedIndustry,
+        createdAt: args.createdAt,
+      });
+      await ensureTenantTaxonomy();
       return existing._id;
     }
 
-    const tenantRecordId = await ctx.db.insert("tenants", args);
+    const tenantRecordId = await ctx.db.insert("tenants", {
+      ...args,
+      vertical: normalizedVertical,
+      industry: normalizedIndustry,
+    });
+    await ensureTenantTaxonomy();
     const pack = loadOperationalPack(
       args.vertical ?? "General",
       args.industry ?? "General",
@@ -354,7 +399,11 @@ export const listTenants = queryGeneric({
   args: {},
   handler: async (ctx) => {
     const tenants = await ctx.db.query("tenants").collect();
-    return tenants.sort((left, right) => left.displayName.localeCompare(right.displayName));
+    return tenants.sort((left, right) => {
+      const leftName = left.displayName ?? left.name ?? left.slug ?? left.id;
+      const rightName = right.displayName ?? right.name ?? right.slug ?? right.id;
+      return leftName.localeCompare(rightName);
+    });
   },
 });
 
