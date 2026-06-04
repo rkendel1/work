@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { resolveTenantId } from "@/lib/tenant-context";
-import { isRootHost, normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 import { ingestSignalWithWasm } from "@/lib/wasm-ingest";
 
 type SignalPayload = {
@@ -19,17 +18,6 @@ type SignalPayload = {
   tenantId?: string;
 };
 
-function normalizeHost(value: string): string {
-  return value.toLowerCase().trim().split(":")[0];
-}
-
-function forwardingTenant(tenantId: string | undefined): string | null {
-  if (!tenantId) {
-    return null;
-  }
-  return normalizeTenantSlug(tenantId) || null;
-}
-
 export async function POST(request: Request) {
   let payload: SignalPayload;
 
@@ -40,37 +28,6 @@ export async function POST(request: Request) {
   }
 
   const sourceType = payload.sourceType?.trim() || "api";
-  const requestHost = normalizeHost(new URL(request.url).host);
-  const requestedTenantId = payload.tenantId?.trim() || undefined;
-  const targetTenant = forwardingTenant(requestedTenantId);
-  const targetDomain = targetTenant && isRootHost(requestHost) ? normalizeHost(tenantDomainFromSlug(targetTenant, requestHost)) : null;
-
-  if (targetDomain && targetDomain !== requestHost) {
-    const protocol =
-      requestHost === "localhost" ||
-      requestHost.endsWith(".localhost") ||
-      targetDomain === "localhost" ||
-      targetDomain.endsWith(".localhost")
-        ? "http"
-        : "https";
-    try {
-      const forwardResponse = await fetch(`${protocol}://${targetDomain}/api/signals`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const body = await forwardResponse.text();
-      return new NextResponse(body, {
-        status: forwardResponse.status,
-        headers: {
-          "Content-Type": forwardResponse.headers.get("Content-Type") ?? "application/json",
-        },
-      });
-    } catch {
-      return NextResponse.json({ error: "Failed to forward signal to tenant domain" }, { status: 502 });
-    }
-  }
-
   const tenantId = payload.tenantId?.trim() || resolveTenantId(request) || "default";
   const normalizedContent = payload.normalizedContent?.trim();
 

@@ -1,5 +1,5 @@
 use actix_cors::Cors;
-use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, web};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -997,6 +997,76 @@ fn resolve_tenant_id(tenant_id: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_TENANT_ID)
         .to_string()
+}
+
+fn normalize_request_host(host: &str) -> String {
+    host.to_lowercase()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn tenant_slug_from_host(host: &str) -> Option<String> {
+    let normalized = normalize_request_host(host);
+    if normalized.is_empty()
+        || normalized == "localhost"
+        || normalized == "127.0.0.1"
+        || normalized == TENANT_BASE_DOMAIN
+        || normalized == format!("www.{TENANT_BASE_DOMAIN}")
+    {
+        return None;
+    }
+
+    if let Some(prefix) = normalized.strip_suffix(".localhost") {
+        return Some(prefix.to_string());
+    }
+
+    let suffix = format!(".{TENANT_BASE_DOMAIN}");
+    if let Some(prefix) = normalized.strip_suffix(&suffix) {
+        return prefix
+            .split('.')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "www")
+            .map(str::to_string);
+    }
+
+    None
+}
+
+fn resolve_signal_tenant_id(
+    state: &State,
+    request: &HttpRequest,
+    payload_tenant_id: Option<&str>,
+) -> String {
+    if let Some(explicit_tenant_id) = payload_tenant_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return explicit_tenant_id.to_string();
+    }
+
+    let request_host = request
+        .headers()
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| request.headers().get("host").and_then(|value| value.to_str().ok()));
+    let slug = request_host
+        .and_then(tenant_slug_from_host)
+        .map(|value| normalize_identifier(&value));
+    if let Some(slug_value) = slug {
+        if let Some(existing_tenant) = state.tenants.iter().find(|tenant| {
+            normalize_identifier(&tenant.slug) == slug_value
+                || normalize_identifier(&tenant.id) == slug_value
+        }) {
+            return existing_tenant.id.clone();
+        }
+        return slug_value;
+    }
+
+    DEFAULT_TENANT_ID.to_string()
 }
 
 fn resolve_idempotency_key(explicit_key: Option<&str>, fallback: String) -> String {
@@ -2554,6 +2624,7 @@ async fn ingest(data: web::Data<AppState>, payload: web::Bytes) -> impl Responde
 
 async fn ingest_signal(
     data: web::Data<AppState>,
+    http_request: HttpRequest,
     request: web::Json<SignalIngestRequest>,
 ) -> impl Responder {
     let source_type = request
@@ -2608,7 +2679,10 @@ async fn ingest_signal(
             .as_ref()
             .and_then(|metadata| metadata.channel.clone()),
     };
-    let tenant_id = resolve_tenant_id(request.tenant_id.as_deref());
+    let tenant_id = {
+        let state = lock_state(&data);
+        resolve_signal_tenant_id(&state, &http_request, request.tenant_id.as_deref())
+    };
     let idempotency_key = resolve_idempotency_key(
         request.idempotency_key.as_deref(),
         format!(
@@ -5052,6 +5126,29 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn tenant_slug_is_resolved_from_subdomain_host() {
+        assert_eq!(
+            tenant_slug_from_host("northstar-facilities.canonflo.com"),
+            Some("northstar-facilities".to_string())
+        );
+        assert_eq!(tenant_slug_from_host("www.canonflo.com"), None);
+    }
+
+    #[actix_web::test]
+    async fn signal_tenant_resolution_prefers_payload_then_subdomain() {
+        let state = State::default();
+        let request = test::TestRequest::default()
+            .insert_header(("host", "harbor-clinic-ops.canonflo.com"))
+            .to_http_request();
+
+        let from_payload = resolve_signal_tenant_id(&state, &request, Some("payload_tenant"));
+        assert_eq!(from_payload, "payload_tenant");
+
+        let from_subdomain = resolve_signal_tenant_id(&state, &request, None);
+        assert_eq!(from_subdomain, "harbor_clinic_ops");
+    }
+
+    #[actix_web::test]
     async fn health_endpoint_returns_service_status() {
         let app = test::init_service(build_app(test_state())).await;
 
@@ -5392,6 +5489,23 @@ mod tests {
         let items: Vec<InboxItem> = test::call_and_read_body_json(&app, items_req).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].content, "Payment failed for invoice #991");
+    }
+
+    #[actix_web::test]
+    async fn signal_ingest_accepts_subdomain_route_without_tenant_id() {
+        let app = test::init_service(build_app(test_state())).await;
+
+        let request = test::TestRequest::post()
+            .uri("/signal")
+            .insert_header(("host", "relay-logistics-hub.canonflo.com"))
+            .set_json(&serde_json::json!({
+                "sourceType": "simulation",
+                "normalizedContent": "Freight lane disruption update"
+            }))
+            .to_request();
+
+        let inbox_item: InboxItem = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(inbox_item.tenant_id, "relay_logistics_hub");
     }
 
     #[actix_web::test]

@@ -35,6 +35,30 @@ async fn deployment_contract_core_routes_resolve_without_404() {
 }
 
 #[actix_web::test]
+async fn deployment_contract_signal_ingest_routes_accept_post() {
+    let app = test::init_service(api::build_app(web::Data::new(api::AppState::new(
+        api::ConvexConfig::default(),
+    ))))
+    .await;
+
+    for route in ["/signal", "/signals"] {
+        let req = test::TestRequest::post()
+            .uri(route)
+            .set_json(serde_json::json!({
+                "sourceType": "simulation",
+                "normalizedContent": "Contract test signal payload"
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "signal route unexpectedly returned 404: {route}"
+        );
+    }
+}
+
+#[actix_web::test]
 async fn deployment_contract_self_validation_endpoint_reports_green() {
     let app = test::init_service(api::build_app(web::Data::new(api::AppState::new(
         api::ConvexConfig::default(),
