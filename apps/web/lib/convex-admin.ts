@@ -15,6 +15,11 @@ type ConvexAuth = {
   explicitScheme: boolean;
 };
 
+type ConvexAuthCandidate = {
+  name: (typeof CONVEX_ADMIN_KEY_NAMES)[number];
+  auth: ConvexAuth;
+};
+
 function parseConvexAuthorization(rawValue: string): ConvexAuth | null {
   let normalized = rawValue.trim().replace(/^['"]|['"]$/g, "");
   normalized = normalized.replace(/^export\s+/i, "");
@@ -42,90 +47,94 @@ function parseConvexAuthorization(rawValue: string): ConvexAuth | null {
   return { scheme: "Convex", token, explicitScheme: false };
 }
 
+function isJwtLikeToken(token: string) {
+  const parts = token.split(".");
+  return parts.length === 3 && parts.every((part) => part.length > 0);
+}
+
 function convexAdminConfig() {
   const deploymentUrl = (process.env.CONVEX_URL ?? process.env.NEXT_PUBLIC_CONVEX_URL ?? "")
     .trim()
     .replace(/\/+$/, "");
-  const rawAdminKey = CONVEX_ADMIN_KEY_NAMES.map((name) => process.env[name]).find(
-    (value) => typeof value === "string" && value.trim().length > 0,
-  );
-  const auth = rawAdminKey ? parseConvexAuthorization(rawAdminKey) : null;
-  if (!deploymentUrl || !auth) {
+  const candidates: ConvexAuthCandidate[] = [];
+  for (const name of CONVEX_ADMIN_KEY_NAMES) {
+    const rawValue = process.env[name];
+    if (!rawValue || !rawValue.trim()) {
+      continue;
+    }
+    const auth = parseConvexAuthorization(rawValue);
+    if (!auth) {
+      continue;
+    }
+    candidates.push({ name, auth });
+  }
+
+  const seen = new Set<string>();
+  const uniqueCandidates = candidates.filter((candidate) => {
+    const key = `${candidate.auth.scheme}::${candidate.auth.token}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  if (!deploymentUrl || uniqueCandidates.length === 0) {
     return null;
   }
-  return { deploymentUrl, auth };
+  return { deploymentUrl, candidates: uniqueCandidates };
+}
+
+function schemesForAuth(auth: ConvexAuth): ConvexAuthScheme[] {
+  if (!auth.explicitScheme) {
+    return isJwtLikeToken(auth.token) ? ["Bearer", "Convex"] : ["Convex"];
+  }
+  return auth.scheme === "Bearer" ? ["Bearer", "Convex"] : ["Convex", "Bearer"];
+}
+
+async function runConvexAdminRequest<T>(
+  endpoint: "mutation" | "query",
+  path: string,
+  args: Record<string, unknown>,
+  parse: (response: Response) => Promise<T>,
+) {
+  const config = convexAdminConfig();
+  if (!config) {
+    throw new Error("Convex admin credentials are not configured");
+  }
+
+  const errors: string[] = [];
+  for (const candidate of config.candidates) {
+    for (const scheme of schemesForAuth(candidate.auth)) {
+      const response = await fetch(`${config.deploymentUrl}/api/${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `${scheme} ${candidate.auth.token}`,
+        },
+        body: JSON.stringify({ path, args }),
+      });
+
+      if (response.ok) {
+        return await parse(response);
+      }
+
+      const body = await response.text();
+      errors.push(`${candidate.name}:${scheme}:${response.status}:${body}`);
+      if (response.status !== 401) {
+        break;
+      }
+    }
+  }
+
+  const details = errors[errors.length - 1];
+  throw new Error(`Convex ${endpoint} ${path} failed (${details})`);
 }
 
 export async function runConvexAdminMutation(path: string, args: ConvexMutationArgs) {
-  const config = convexAdminConfig();
-  if (!config) {
-    throw new Error("Convex admin credentials are not configured");
-  }
-
-  const schemes: ConvexAuthScheme[] = config.auth.explicitScheme
-    ? [config.auth.scheme]
-    : [config.auth.scheme, "Bearer"];
-  let lastStatus = 0;
-  let lastBody = "";
-
-  for (const scheme of schemes) {
-    const response = await fetch(`${config.deploymentUrl}/api/mutation`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `${scheme} ${config.auth.token}`,
-      },
-      body: JSON.stringify({ path, args }),
-    });
-
-    if (response.ok) {
-      return;
-    }
-
-    const body = await response.text();
-    lastStatus = response.status;
-    lastBody = body;
-    if (response.status !== 401 || config.auth.explicitScheme) {
-      break;
-    }
-  }
-
-  throw new Error(`Convex mutation ${path} failed (${lastStatus}): ${lastBody}`);
+  await runConvexAdminRequest("mutation", path, args, async () => undefined);
 }
 
 export async function runConvexAdminQuery<T>(path: string, args: ConvexQueryArgs) {
-  const config = convexAdminConfig();
-  if (!config) {
-    throw new Error("Convex admin credentials are not configured");
-  }
-
-  const schemes: ConvexAuthScheme[] = config.auth.explicitScheme
-    ? [config.auth.scheme]
-    : [config.auth.scheme, "Bearer"];
-  let lastStatus = 0;
-  let lastBody = "";
-
-  for (const scheme of schemes) {
-    const response = await fetch(`${config.deploymentUrl}/api/query`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `${scheme} ${config.auth.token}`,
-      },
-      body: JSON.stringify({ path, args }),
-    });
-
-    if (response.ok) {
-      return (await response.json()) as T;
-    }
-
-    const body = await response.text();
-    lastStatus = response.status;
-    lastBody = body;
-    if (response.status !== 401 || config.auth.explicitScheme) {
-      break;
-    }
-  }
-
-  throw new Error(`Convex query ${path} failed (${lastStatus}): ${lastBody}`);
+  return await runConvexAdminRequest("query", path, args, async (response) => (await response.json()) as T);
 }
