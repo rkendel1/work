@@ -353,7 +353,147 @@ export const createTenant = mutationGeneric({
 export const listTenants = queryGeneric({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db.query("tenants").collect();
+    const tenants = await ctx.db.query("tenants").collect();
+    return tenants.sort((left, right) => left.displayName.localeCompare(right.displayName));
+  },
+});
+
+export const updateTenantProfile = mutationGeneric({
+  args: {
+    tenantId: v.string(),
+    displayName: v.optional(v.string()),
+    domain: v.optional(v.string()),
+    vertical: v.optional(v.string()),
+    industry: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const tenant = await ctx.db
+      .query("tenants")
+      .filter((query) => query.eq(query.field("id"), args.tenantId))
+      .first();
+    if (!tenant) {
+      throw new Error("tenant not found");
+    }
+
+    const nextDisplayName = args.displayName?.trim() || tenant.displayName;
+    const nextVertical = args.vertical?.trim() || tenant.vertical;
+    const nextIndustry = args.industry?.trim() || tenant.industry;
+    const nextDomain = args.domain?.trim() || tenant.domain;
+
+    await ctx.db.patch(tenant._id, {
+      displayName: nextDisplayName,
+      name: nextDisplayName,
+      domain: nextDomain,
+      vertical: nextVertical,
+      industry: nextIndustry,
+    });
+
+    if (nextVertical) {
+      const existingVertical = await ctx.db
+        .query("verticals")
+        .withIndex("by_name", (query) => query.eq("name", nextVertical))
+        .first();
+      if (!existingVertical) {
+        await ctx.db.insert("verticals", { name: nextVertical });
+      }
+    }
+
+    if (nextVertical && nextIndustry) {
+      const existingIndustry = await ctx.db
+        .query("industries")
+        .withIndex("by_vertical_name", (query) => query.eq("vertical", nextVertical))
+        .filter((query) => query.eq(query.field("name"), nextIndustry))
+        .first();
+      if (!existingIndustry) {
+        await ctx.db.insert("industries", {
+          vertical: nextVertical,
+          name: nextIndustry,
+        });
+      }
+    }
+
+    return tenant._id;
+  },
+});
+
+export const listVerticals = queryGeneric({
+  args: {},
+  handler: async (ctx) => {
+    const verticals = await ctx.db.query("verticals").collect();
+    return verticals.sort((left, right) => left.name.localeCompare(right.name));
+  },
+});
+
+export const upsertVertical = mutationGeneric({
+  args: {
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const name = args.name.trim();
+    if (!name) {
+      throw new Error("name is required");
+    }
+
+    const existing = await ctx.db
+      .query("verticals")
+      .withIndex("by_name", (query) => query.eq("name", name))
+      .first();
+    if (existing) {
+      return existing._id;
+    }
+    return await ctx.db.insert("verticals", { name });
+  },
+});
+
+export const listIndustries = queryGeneric({
+  args: {
+    vertical: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const vertical = args.vertical?.trim();
+    const industries = vertical
+      ? await ctx.db
+          .query("industries")
+          .withIndex("by_vertical_name", (query) => query.eq("vertical", vertical))
+          .collect()
+      : await ctx.db.query("industries").collect();
+    return industries.sort((left, right) => {
+      const leftKey = `${left.vertical}::${left.name}`;
+      const rightKey = `${right.vertical}::${right.name}`;
+      return leftKey.localeCompare(rightKey);
+    });
+  },
+});
+
+export const upsertIndustry = mutationGeneric({
+  args: {
+    vertical: v.string(),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const vertical = args.vertical.trim();
+    const name = args.name.trim();
+    if (!vertical || !name) {
+      throw new Error("vertical and name are required");
+    }
+
+    const existingVertical = await ctx.db
+      .query("verticals")
+      .withIndex("by_name", (query) => query.eq("name", vertical))
+      .first();
+    if (!existingVertical) {
+      await ctx.db.insert("verticals", { name: vertical });
+    }
+
+    const existing = await ctx.db
+      .query("industries")
+      .withIndex("by_vertical_name", (query) => query.eq("vertical", vertical))
+      .filter((query) => query.eq(query.field("name"), name))
+      .first();
+    if (existing) {
+      return existing._id;
+    }
+    return await ctx.db.insert("industries", { vertical, name });
   },
 });
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
 type Tenant = {
   id: string;
@@ -213,6 +214,13 @@ export default function SimulatePage() {
         <p className="text-zinc-600 dark:text-zinc-400">
           Inject operational scenarios into the live stream and run the full ingest-to-execution pipeline.
         </p>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          Need demo tenant setup?{" "}
+          <Link href="/demo-admin" className="underline">
+            Open Demo Admin Tool
+          </Link>
+          .
+        </p>
       </section>
 
       <form onSubmit={runInjection} className="grid gap-4 rounded-lg border bg-white p-5 dark:bg-zinc-800 dark:border-zinc-700">
@@ -305,6 +313,15 @@ export default function SimulatePage() {
       </form>
 
       {status ? <p className="text-sm text-zinc-700 dark:text-zinc-300">{status}</p> : null}
+      {tenants.length === 0 ? (
+        <p className="text-sm text-zinc-700 dark:text-zinc-300">
+          No tenants found. Create and seed one in{" "}
+          <Link href="/demo-admin" className="underline">
+            Demo Admin Tool
+          </Link>
+          .
+        </p>
+      ) : null}
       {results.length > 0 ? (
         <section className="rounded-lg border bg-white p-5 dark:border-zinc-700 dark:bg-zinc-800">
           <h2 className="text-lg font-semibold">Signals sent</h2>

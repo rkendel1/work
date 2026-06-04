@@ -1,4 +1,5 @@
 type ConvexMutationArgs = Record<string, unknown>;
+type ConvexQueryArgs = Record<string, unknown>;
 
 function normalizeConvexAdminKey(rawValue: string): string {
   let normalized = rawValue.trim().replace(/^['"]|['"]$/g, "");
@@ -44,4 +45,27 @@ export async function runConvexAdminMutation(path: string, args: ConvexMutationA
 
   const body = await response.text();
   throw new Error(`Convex mutation ${path} failed (${response.status}): ${body}`);
+}
+
+export async function runConvexAdminQuery<T>(path: string, args: ConvexQueryArgs) {
+  const config = convexAdminConfig();
+  if (!config) {
+    throw new Error("Convex admin credentials are not configured");
+  }
+
+  const response = await fetch(`${config.deploymentUrl}/api/query`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Convex ${config.adminKey}`,
+    },
+    body: JSON.stringify({ path, args }),
+  });
+
+  if (response.ok) {
+    return (await response.json()) as T;
+  }
+
+  const body = await response.text();
+  throw new Error(`Convex query ${path} failed (${response.status}): ${body}`);
 }

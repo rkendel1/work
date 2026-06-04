@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { RUST_INGRESS_URL } from "@/lib/runtime-config";
-import { runConvexAdminMutation } from "@/lib/convex-admin";
+import { runConvexAdminMutation, runConvexAdminQuery } from "@/lib/convex-admin";
 import { normalizeTenantSlug, tenantDomainFromSlug } from "@/lib/tenant-routing";
 
 function requestHost(request: Request): string {
@@ -69,6 +69,43 @@ async function fetchIngressTenants() {
   return response;
 }
 
+async function fetchConvexTenants() {
+  try {
+    const tenants = await runConvexAdminQuery<TenantRecord[]>("actions:listTenants", {});
+    return Array.isArray(tenants) ? tenants : [];
+  } catch {
+    return [];
+  }
+}
+
+function mergeTenantLists(host: string, ingressTenants: TenantRecord[], convexTenants: TenantRecord[]) {
+  const byKey = new Map<string, TenantRecord>();
+  for (const tenant of [...ingressTenants, ...convexTenants]) {
+    const normalized = normalizeTenantRecord(tenant, host);
+    const key = normalized.id || normalized.slug;
+    if (!key) {
+      continue;
+    }
+    byKey.set(key, normalized);
+  }
+  return Array.from(byKey.values()).sort((left, right) =>
+    (left.display_name ?? left.name).localeCompare(right.display_name ?? right.name),
+  );
+}
+
+async function persistTenantToConvex(tenant: TenantRecord) {
+  await runConvexAdminMutation("actions:createTenant", {
+    id: tenant.id,
+    name: tenant.name,
+    slug: tenant.slug,
+    domain: tenant.domain,
+    displayName: tenant.display_name ?? tenant.displayName ?? tenant.name,
+    vertical: tenant.vertical,
+    industry: tenant.industry,
+    createdAt: tenant.created_at ?? tenant.createdAt ?? Math.floor(Date.now() / 1000),
+  });
+}
+
 async function ensureSimulationTenantBlueprints(tenants: TenantRecord[]) {
   const existingSlugs = new Set(tenants.map(tenantSlugFromRecord));
   const missingBlueprints = SIMULATION_TENANT_BLUEPRINTS.filter((tenant) => !existingSlugs.has(tenant.slug));
@@ -132,6 +169,13 @@ export async function GET(request: Request) {
   try {
     const response = await fetchIngressTenants();
     if (!response.ok) {
+      const convexTenants = await fetchConvexTenants();
+      if (convexTenants.length > 0) {
+        return NextResponse.json(
+          mergeTenantLists(host, [], convexTenants),
+          { status: 200 },
+        );
+      }
       return NextResponse.json({ error: "Failed to load tenants" }, { status: response.status });
     }
 
@@ -149,11 +193,17 @@ export async function GET(request: Request) {
     }
 
     const refreshedTenants = (await refreshed.json()) as unknown;
-    const normalized = (Array.isArray(refreshedTenants) ? refreshedTenants : [])
-      .map((tenant) => normalizeTenantRecord(tenant as TenantRecord, host))
-      .sort((left, right) => (left.display_name ?? left.name).localeCompare(right.display_name ?? right.name));
+    const ingressNormalized = (Array.isArray(refreshedTenants) ? refreshedTenants : []).map((tenant) =>
+      normalizeTenantRecord(tenant as TenantRecord, host),
+    );
+    const convexTenants = await fetchConvexTenants();
+    const normalized = mergeTenantLists(host, ingressNormalized, convexTenants);
     return NextResponse.json(normalized, { status: 200 });
   } catch {
+    const convexTenants = await fetchConvexTenants();
+    if (convexTenants.length > 0) {
+      return NextResponse.json(mergeTenantLists(host, [], convexTenants), { status: 200 });
+    }
     if (simulationFallbackAllowed()) {
       return NextResponse.json([], { status: 200 });
     }
@@ -180,6 +230,9 @@ export async function POST(request: Request) {
 
     if (!response.ok && response.status >= 500 && allowFallback) {
       const tenant = simulationTenantFromPayload(payload, host);
+      try {
+        await persistTenantToConvex(tenant);
+      } catch {}
       return NextResponse.json(tenant, { status: 201 });
     }
 
@@ -192,16 +245,7 @@ export async function POST(request: Request) {
     }
 
     const tenant = JSON.parse(body) as TenantRecord;
-    await runConvexAdminMutation("actions:createTenant", {
-      id: tenant.id,
-      name: tenant.name,
-      slug: tenant.slug,
-      domain: tenant.domain,
-      displayName: tenant.displayName ?? tenant.display_name ?? tenant.name,
-      vertical: tenant.vertical,
-      industry: tenant.industry,
-      createdAt: tenant.createdAt ?? tenant.created_at ?? Math.floor(Date.now() / 1000),
-    });
+    await persistTenantToConvex(tenant);
 
     const { userId } = await auth();
     if (userId) {
@@ -221,7 +265,11 @@ export async function POST(request: Request) {
     return NextResponse.json(tenant, { status: response.status });
   } catch {
     if (allowFallback) {
-      return NextResponse.json(simulationTenantFromPayload(payload, host), { status: 201 });
+      const tenant = simulationTenantFromPayload(payload, host);
+      try {
+        await persistTenantToConvex(tenant);
+      } catch {}
+      return NextResponse.json(tenant, { status: 201 });
     }
     return NextResponse.json({ error: "Failed to create tenant" }, { status: 502 });
   }
