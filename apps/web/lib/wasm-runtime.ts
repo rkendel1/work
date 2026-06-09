@@ -47,8 +47,9 @@ function createProcessBinding(wasm: WasmBindgenExports): WasmRuntime["process"] 
       return 0;
     }
 
+    let length = value.length;
     let offset = 0;
-    let pointer = wasm.__wbindgen_malloc(value.length, 1);
+    let pointer = wasm.__wbindgen_malloc(length, 1);
     const memory = getUint8Memory();
 
     for (; offset < value.length; offset += 1) {
@@ -60,11 +61,16 @@ function createProcessBinding(wasm: WasmBindgenExports): WasmRuntime["process"] 
     }
 
     if (offset !== value.length) {
-      const remainder = value.slice(offset);
-      pointer = wasm.__wbindgen_realloc(pointer, value.length, offset + remainder.length * 3, 1);
-      const view = getUint8Memory().subarray(pointer + offset, pointer + offset + remainder.length * 3);
-      const encoded = textEncoder.encodeInto(remainder, view);
+      if (offset !== 0) {
+        value = value.slice(offset);
+      }
+      const nextLength = offset + value.length * 3;
+      pointer = wasm.__wbindgen_realloc(pointer, length, nextLength, 1);
+      length = nextLength;
+      const view = getUint8Memory().subarray(pointer + offset, pointer + length);
+      const encoded = textEncoder.encodeInto(value, view);
       offset += encoded.written ?? 0;
+      pointer = wasm.__wbindgen_realloc(pointer, length, offset, 1);
     }
 
     vectorLength = offset;
