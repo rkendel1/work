@@ -6,7 +6,12 @@ function normalizeHost(host: string | null | undefined): string {
   if (!host) {
     return "";
   }
-  return host.toLowerCase().split(":")[0];
+  return host
+    .toLowerCase()
+    .split(",")[0]
+    .trim()
+    .split(":")[0]
+    .trim();
 }
 
 export function normalizeTenantSlug(slug: string | null | undefined): string {
@@ -61,8 +66,8 @@ export function tenantSlugFromHost(host: string | null | undefined): string | nu
 
   if (normalizedHost.endsWith(`.${SAAS_ROOT_DOMAIN}`)) {
     const subdomain = normalizedHost.slice(0, -1 * (SAAS_ROOT_DOMAIN.length + 1));
-    const firstLabel = subdomain.split(".")[0];
-    const slug = firstLabel.startsWith("www.") ? firstLabel.slice(4) : firstLabel;
+    const trimmedSubdomain = subdomain.startsWith("www.") ? subdomain.slice(4) : subdomain;
+    const slug = trimmedSubdomain.split(".")[0];
     return slug || null;
   }
 
