@@ -243,7 +243,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const tenant = JSON.parse(body) as TenantRecord;
+    const tenant = normalizeTenantRecord(JSON.parse(body) as TenantRecord, host);
     await persistTenantToConvex(tenant);
 
     const { userId } = await auth();
